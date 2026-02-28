@@ -1,0 +1,31 @@
+# Genshin Artifact Calculator
+
+Deterministic calculator for Genshin Impact artifact farming, scoring, and strategy planning.
+
+## Key Features
+
+- Domain / Strongbox (Oferta Mística) / Transmuter (Transmutador de Artefatos) strategy analysis
+- Upgrade requirement modeling with 3-sub vs 4-sub artifact roll nuance
+- Deterministic CV (Crit Value / Valor Crítico) scoring
+- Optimizer recommendations with run/resin targets per strategy
+- Shareable link config via `cfg` query param
+- PT-BR localization and dark mode support
+
+## Assumptions
+
+- Always AR45+ (5-star domains)
+
+## Commands
+
+```bash
+pnpm install
+pnpm dev
+pnpm test
+pnpm build
+pnpm start
+```
+
+## Share Links (`cfg`)
+
+The app can serialize UI/form state into the `cfg` query param (base64url JSON payload).
+Opening a shared link restores configuration (including locale/theme when present).
