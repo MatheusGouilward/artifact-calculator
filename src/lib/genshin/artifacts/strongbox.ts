@@ -96,6 +96,106 @@ export function probSuccessAfterRunsWithStrongboxGivenAttemptProbs(
   return clamp01(probability);
 }
 
+export function expectedGainAfterRunsWithStrongboxGivenAttemptGains(
+  runs: number,
+  gAttemptDomain: number,
+  gAttemptStrongbox: number,
+  recycleRate = 1,
+): number {
+  assertRuns(runs);
+  assertProbability(gAttemptDomain, "gAttemptDomain");
+  assertProbability(gAttemptStrongbox, "gAttemptStrongbox");
+  if (runs === 0) {
+    return 0;
+  }
+
+  const recycle = clamp01(recycleRate);
+  if (recycle === 0) {
+    const gRunDomain =
+      DOMAIN_ATTEMPTS_PER_RUN.oneArtifact * gAttemptDomain +
+      DOMAIN_ATTEMPTS_PER_RUN.twoArtifacts * (2 * gAttemptDomain);
+    return gRunDomain * runs;
+  }
+
+  const dMax = runs * 2;
+  const gainAtDomainAttempts = new Float64Array(dMax + 1);
+  const prev = new Float64Array(3);
+  const curr = new Float64Array(3);
+
+  for (let d = 1; d <= dMax; d += 1) {
+    for (let remainder = 0; remainder <= 2; remainder += 1) {
+      const nextIfRecycle =
+        remainder < 2
+          ? prev[remainder + 1]
+          : gAttemptStrongbox +
+            gAttemptStrongbox * prev[0] +
+            (1 - gAttemptStrongbox) * prev[1];
+
+      curr[remainder] =
+        gAttemptDomain +
+        gAttemptDomain * prev[remainder] +
+        (1 - gAttemptDomain) * ((1 - recycle) * prev[remainder] + recycle * nextIfRecycle);
+    }
+
+    gainAtDomainAttempts[d] = curr[0];
+    prev[0] = curr[0];
+    prev[1] = curr[1];
+    prev[2] = curr[2];
+  }
+
+  const extraAttemptDistribution = binomialPmfSequence(
+    runs,
+    DOMAIN_ATTEMPTS_PER_RUN.twoArtifacts,
+  );
+  let expectedGain = 0;
+
+  for (let extra = 0; extra <= runs; extra += 1) {
+    expectedGain += extraAttemptDistribution[extra] * gainAtDomainAttempts[runs + extra];
+  }
+
+  return Math.max(0, expectedGain);
+}
+
+export function expectedGainPerDomainAttemptWithStrongbox(
+  gAttemptDomain: number,
+  gAttemptStrongbox: number,
+  recycleRate = 1,
+): number {
+  assertProbability(gAttemptDomain, "gAttemptDomain");
+  assertProbability(gAttemptStrongbox, "gAttemptStrongbox");
+
+  const recycle = clamp01(recycleRate);
+  if (recycle === 0) {
+    return gAttemptDomain;
+  }
+
+  const attempts = 400;
+  const prev = new Float64Array(3);
+  const curr = new Float64Array(3);
+
+  for (let domainAttempts = 1; domainAttempts <= attempts; domainAttempts += 1) {
+    for (let remainder = 0; remainder <= 2; remainder += 1) {
+      const nextIfRecycle =
+        remainder < 2
+          ? prev[remainder + 1]
+          : gAttemptStrongbox +
+            gAttemptStrongbox * prev[0] +
+            (1 - gAttemptStrongbox) * prev[1];
+
+      curr[remainder] =
+        gAttemptDomain +
+        gAttemptDomain * prev[remainder] +
+        (1 - gAttemptDomain) * ((1 - recycle) * prev[remainder] + recycle * nextIfRecycle);
+    }
+
+    prev[0] = curr[0];
+    prev[1] = curr[1];
+    prev[2] = curr[2];
+  }
+
+  return Math.max(0, prev[0] / attempts);
+}
+
 export function runsForTargetChanceWithStrongbox(
   params: ArtifactFarmParams,
   upgrade: UpgradeRequirement | undefined,
