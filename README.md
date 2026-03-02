@@ -20,10 +20,16 @@ Deterministic calculator for Genshin Impact artifact farming, scoring, and strat
 ```bash
 pnpm install
 pnpm dev
+pnpm update:game-data
 pnpm test
 pnpm build
 pnpm start
 ```
+
+## Game Data Updates
+
+- Run `pnpm update:game-data` to refresh `game-data-lite.json` locally.
+- A GitHub Actions workflow (`.github/workflows/update-game-data.yml`) can run manually or weekly to open a PR when generated data changes.
 
 ## Share Links (`cfg`)
 
