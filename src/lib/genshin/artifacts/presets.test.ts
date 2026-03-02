@@ -277,4 +277,46 @@ describe("share config encoding", () => {
 
     expect(decodeArtifactCalculatorShareState("definitely-not-valid-base64", fallback)).toBeNull();
   });
+
+  it("normalizes Flower main stat to Flat HP when decoding cfg", () => {
+    const fallback: ArtifactCalculatorShareState = {
+      targetSet: "A",
+      slot: Slot.Sands,
+      main: MainStat.AtkPercent,
+      desiredSubs: [SubStat.CritRate, SubStat.CritDmg],
+      ruleMode: "all",
+      atLeastN: 1,
+      runMode: "runs",
+      runs: 100,
+      resin: 2000,
+      targetProb: 0.9,
+      upgradeEnabled: false,
+      upgradePreset: "crit",
+      upgradeCustomGroup: [SubStat.CritRate, SubStat.CritDmg],
+      upgradeK: 3,
+      farmStrategy: "domainsOnly",
+      recycleRatePct: 100,
+      transmuterEnabled: false,
+      transmuterElixirs: 0,
+      transmuterMaxCrafts: 2,
+      transmuterFixedSubs: [SubStat.CritRate, SubStat.CritDmg],
+      cvEnabled: false,
+      cvThreshold: 30,
+      cvAttemptSource: "domain",
+      optimizerEnabled: false,
+      optimizerObjective: "constraints",
+    };
+
+    const invalidState: ArtifactCalculatorShareState = {
+      ...fallback,
+      slot: Slot.Flower,
+      main: MainStat.AtkPercent,
+    };
+    const encoded = encodeArtifactCalculatorShareState(invalidState);
+    const decoded = decodeArtifactCalculatorShareState(encoded, fallback);
+
+    expect(decoded).not.toBeNull();
+    expect(decoded?.slot).toBe(Slot.Flower);
+    expect(decoded?.main).toBe(MainStat.FlatHp);
+  });
 });

@@ -5,6 +5,7 @@ import {
   availableSubStats,
   binomialTailAtLeast,
   probFinal4SubsSatisfyRule,
+  probPerAttempt,
   probSuccessPerAttempt,
   probUpgradeGivenCandidate,
 } from "./engine";
@@ -113,5 +114,38 @@ describe("upgrade helpers", () => {
     expect(result.breakdown.pUpgradeCond).toBeLessThanOrEqual(1);
     expect(result.pAttemptSuccess).toBeGreaterThanOrEqual(0);
     expect(result.pAttemptSuccess).toBeLessThanOrEqual(1);
+  });
+
+  it("normalizes fixed-slot main stat for Flower and does not throw", () => {
+    const invalidForFlower = {
+      slot: Slot.Flower,
+      main: MainStat.AtkPercent,
+      requiredSubs: [SubStat.CritRate],
+      subsRule: { mode: "all" as const },
+    };
+    const validFlower = {
+      slot: Slot.Flower,
+      main: MainStat.FlatHp,
+      requiredSubs: [SubStat.CritRate],
+      subsRule: { mode: "all" as const },
+    };
+
+    expect(() => probPerAttempt(invalidForFlower)).not.toThrow();
+    const normalized = probPerAttempt(invalidForFlower);
+    const baseline = probPerAttempt(validFlower);
+
+    expect(normalized.pAttempt).toBeCloseTo(baseline.pAttempt, 12);
+    expect(normalized.breakdown.pMain).toBeCloseTo(baseline.breakdown.pMain, 12);
+  });
+
+  it("still throws for invalid main stat on non-fixed slots", () => {
+    expect(() =>
+      probPerAttempt({
+        slot: Slot.Sands,
+        main: MainStat.PyroDmgBonus,
+        requiredSubs: [SubStat.CritRate],
+        subsRule: { mode: "all" },
+      }),
+    ).toThrow(/not valid for slot/i);
   });
 });

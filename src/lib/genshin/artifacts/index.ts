@@ -6,5 +6,7 @@ export * from "./strongbox";
 export * from "./transmuter";
 export * from "./scoring";
 export * from "./optimizer";
+export * from "./efficiency-curve";
+export * from "./stop-point";
 export * from "./presets";
 export * from "./share";

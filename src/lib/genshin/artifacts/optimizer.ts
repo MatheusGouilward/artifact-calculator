@@ -81,6 +81,14 @@ export function evaluateStrategies(input: EvaluateStrategiesInput): StrategyResu
   }));
 }
 
+export function strategySuccessAtRuns(
+  input: EvaluateStrategiesInput,
+  strategyName: StrategyName,
+  runs: number,
+): number {
+  return pSuccessForStrategyAtRuns(input, strategyName, runs);
+}
+
 export function bestStrategy(results: StrategyResult[]): StrategyResult {
   if (!Array.isArray(results) || results.length === 0) {
     throw new ArtifactEngineError("INVALID_PARAM", "results must be a non-empty array.");
