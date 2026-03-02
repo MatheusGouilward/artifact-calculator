@@ -1,6 +1,6 @@
-import { ArtifactCalculator } from "@/components/artifact-calculator";
+import { HomeEntry } from "@/components/home-entry";
 import packageJson from "../../package.json";
 
 export default function Home() {
-  return <ArtifactCalculator appName={packageJson.name} appVersion={packageJson.version} />;
+  return <HomeEntry appName={packageJson.name} appVersion={packageJson.version} />;
 }
