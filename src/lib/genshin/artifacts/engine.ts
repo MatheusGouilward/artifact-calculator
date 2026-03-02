@@ -35,7 +35,8 @@ export interface UpgradeRequirementEnabled {
 export type UpgradeRequirement = { enabled: false } | UpgradeRequirementEnabled;
 
 export function mainStatProb(slot: Slot, main: MainStat): number {
-  return MAIN_STAT_PROBABILITIES[slot][main] ?? 0;
+  const normalizedMain = normalizeMainForSlot(slot, main);
+  return MAIN_STAT_PROBABILITIES[slot][normalizedMain] ?? 0;
 }
 
 export function availableSubStats(main: MainStat): { subs: SubStat[]; weights: number[] } {
@@ -181,20 +182,28 @@ export function probPerAttempt(params: ArtifactFarmParams): {
   breakdown: { pSet: number; pSlot: number; pMain: number; pSubs: number };
   pAttempt: number;
 } {
-  validateParams(params);
+  const normalizedParams = normalizeParamsForEngine(params);
+  validateParams(normalizedParams);
 
-  const resolvedSetProbability = params.setProbability ?? params.setProbOverride ?? DEFAULT_SET_PROBABILITY;
-  const pSlot = params.slotProbability ?? DEFAULT_SLOT_PROBABILITY;
-  const pMain = mainStatProb(params.slot, params.main);
+  const resolvedSetProbability =
+    normalizedParams.setProbability ??
+    normalizedParams.setProbOverride ??
+    DEFAULT_SET_PROBABILITY;
+  const pSlot = normalizedParams.slotProbability ?? DEFAULT_SLOT_PROBABILITY;
+  const pMain = mainStatProb(normalizedParams.slot, normalizedParams.main);
 
   if (pMain <= 0) {
     throw new ArtifactEngineError(
       "INVALID_MAIN_FOR_SLOT",
-      `Main stat "${params.main}" is not valid for slot "${params.slot}".`,
+      `Main stat "${normalizedParams.main}" is not valid for slot "${normalizedParams.slot}".`,
     );
   }
 
-  const pSubs = probFinal4SubsSatisfyRule(params.requiredSubs, params.main, params.subsRule);
+  const pSubs = probFinal4SubsSatisfyRule(
+    normalizedParams.requiredSubs,
+    normalizedParams.main,
+    normalizedParams.subsRule,
+  );
   const pAttempt = clampProbability(resolvedSetProbability * pSlot * pMain * pSubs);
 
   return {
@@ -236,15 +245,20 @@ export function probUpgradeGivenCandidate(
   params: ArtifactFarmParams,
   upgrade: UpgradeRequirementEnabled,
 ): number {
-  validateParams(params);
+  const normalizedParams = normalizeParamsForEngine(params);
+  validateParams(normalizedParams);
   validateUpgradeRequirement(upgrade);
 
-  const matcher = createCandidateMaskMatcher(params.requiredSubs, params.main, params.subsRule);
+  const matcher = createCandidateMaskMatcher(
+    normalizedParams.requiredSubs,
+    normalizedParams.main,
+    normalizedParams.subsRule,
+  );
   if (!matcher.possible) {
     return 0;
   }
 
-  const distribution = final4MaskDistribution(params.main);
+  const distribution = final4MaskDistribution(normalizedParams.main);
   let denominator = 0;
   let numerator = 0;
 
@@ -255,7 +269,7 @@ export function probUpgradeGivenCandidate(
     denominator += branchProbability;
     numerator +=
       branchProbability *
-      probUpgradeHitsAtLeastGivenMask(mask, upgrade.targetGroup, params.main, 5, upgrade.k);
+      probUpgradeHitsAtLeastGivenMask(mask, upgrade.targetGroup, normalizedParams.main, 5, upgrade.k);
   }
 
   for (const [mask, branchProbability] of distribution.from3.entries()) {
@@ -265,7 +279,7 @@ export function probUpgradeGivenCandidate(
     denominator += branchProbability;
     numerator +=
       branchProbability *
-      probUpgradeHitsAtLeastGivenMask(mask, upgrade.targetGroup, params.main, 4, upgrade.k);
+      probUpgradeHitsAtLeastGivenMask(mask, upgrade.targetGroup, normalizedParams.main, 4, upgrade.k);
   }
 
   if (denominator <= 0) {
@@ -289,7 +303,8 @@ export function probSuccessPerAttempt(
   pAttemptCandidate: number;
   pAttemptSuccess: number;
 } {
-  const candidate = probPerAttempt(params);
+  const normalizedParams = normalizeParamsForEngine(params);
+  const candidate = probPerAttempt(normalizedParams);
 
   if (!upgrade || !upgrade.enabled) {
     return {
@@ -302,7 +317,7 @@ export function probSuccessPerAttempt(
     };
   }
 
-  const pUpgradeCond = probUpgradeGivenCandidate(params, upgrade);
+  const pUpgradeCond = probUpgradeGivenCandidate(normalizedParams, upgrade);
   const pAttemptSuccess = clampProbability(candidate.pAttempt * pUpgradeCond);
 
   return {
@@ -422,6 +437,27 @@ function validateParams(params: ArtifactFarmParams): void {
   if (params.slotProbability !== undefined) {
     assertProbability(params.slotProbability, "slotProbability");
   }
+}
+
+function normalizeParamsForEngine(params: ArtifactFarmParams): ArtifactFarmParams {
+  const normalizedMain = normalizeMainForSlot(params.slot, params.main);
+  if (normalizedMain === params.main) {
+    return params;
+  }
+  return {
+    ...params,
+    main: normalizedMain,
+  };
+}
+
+function normalizeMainForSlot(slot: Slot, main: MainStat): MainStat {
+  if (slot === Slot.Flower) {
+    return MainStat.FlatHp;
+  }
+  if (slot === Slot.Plume) {
+    return MainStat.FlatAtk;
+  }
+  return main;
 }
 
 function validateRule(rule: SubsRule): void {

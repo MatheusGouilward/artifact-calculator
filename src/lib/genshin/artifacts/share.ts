@@ -225,7 +225,8 @@ export function sanitizeArtifactCalculatorShareState(
   fallback: ArtifactCalculatorShareState,
 ): ArtifactCalculatorShareState {
   const slot = pickOneOf(candidate.slot, SLOT_VALUES, fallback.slot);
-  const main = resolveMainForSlot(slot, pickOneOf(candidate.main, MAIN_VALUES, fallback.main));
+  const requestedMain = pickOneOf(candidate.main, MAIN_VALUES, fallback.main);
+  const main = resolveMainForSlot(slot, normalizeMainForSlot(slot, requestedMain));
   const excludedSub = excludedSubStatForMain(main);
 
   const desiredSubs = pickSubStats(candidate.desiredSubs, fallback.desiredSubs, excludedSub, SUBSTAT_VALUES.length);
@@ -293,6 +294,16 @@ export function sanitizeArtifactCalculatorShareState(
       fallback.optimizerObjective,
     ),
   };
+}
+
+function normalizeMainForSlot(slot: Slot, main: MainStat): MainStat {
+  if (slot === Slot.Flower) {
+    return MainStat.FlatHp;
+  }
+  if (slot === Slot.Plume) {
+    return MainStat.FlatAtk;
+  }
+  return main;
 }
 
 function resolveMainForSlot(slot: Slot, main: MainStat): MainStat {
