@@ -1,9 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Controller, useForm } from "react-hook-form";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 
@@ -24,6 +34,8 @@ import {
   evaluateStrategies,
   expectedRuns,
   excludedSubStatForMain,
+  findStopPoint,
+  generateEfficiencyCurve,
   getArtifactPresetById,
   probPerRunFromAttempt,
   probSuccessAfterPeriodCombined,
@@ -35,6 +47,31 @@ import {
   runsForTargetChanceWithStrongbox,
   sanitizeArtifactCalculatorShareState,
 } from "@/lib/genshin/artifacts";
+import {
+  analyzeArtifactPriorities,
+  computeDamageIndexFromEnka,
+  computeFocusGlobalEfficiency,
+  computeResinRecommendations,
+  mapEnkaEquipTypeToSlot,
+  mapEnkaStatToStatKey,
+  type ArtifactPriorityReport,
+  type BuildProfileId,
+  type ExpectedDamageSimpleObjectiveConfig,
+  type FocusGlobalEfficiencyReport,
+  type FocusGlobalStrategyScope,
+  type ResinRecommendationReport,
+  type StatKey,
+} from "@/lib/genshin/eval";
+import {
+  loadGameDataLite,
+  localizeGameDataName,
+  resolveArtifactSet,
+  resolveCharacter,
+  resolveWeapon,
+} from "@/lib/genshin/game-data";
+import type { EnkaCharacterSummary } from "@/lib/enka/types";
+import { useActiveEnkaCharacter } from "@/lib/enka/use-active-character";
+import { EnkaActiveCard } from "@/components/enka-active-card";
 import { useLocale } from "@/components/locale-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -65,7 +102,28 @@ const UPGRADE_PRESETS = ["crit", "er", "em", "custom"] as const;
 const FARM_STRATEGIES = ["domainsOnly", "strongbox", "transmuterOnly", "combined"] as const;
 const CV_ATTEMPT_SOURCES = ["domain", "strongbox", "transmuter"] as const;
 const OPTIMIZER_OBJECTIVES = ["constraints", "cv"] as const;
+const BUILD_PROFILE_OPTIONS: BuildProfileId[] = ["critDps", "supportEr", "emReaction"];
+const GLOBAL_STRATEGY_SCOPE_OPTIONS: FocusGlobalStrategyScope[] = ["domainsOnly", "domainsStrongbox"];
 const PRESET_NONE = "__none__";
+type DamageIndexScalingStat = ExpectedDamageSimpleObjectiveConfig["scaling"]["stat"];
+type DamageIndexType = NonNullable<ExpectedDamageSimpleObjectiveConfig["damageType"]>;
+const DAMAGE_INDEX_SCALING_OPTIONS: readonly DamageIndexScalingStat[] = ["atk", "hp", "def", "em"];
+const DAMAGE_INDEX_DAMAGE_TYPES: readonly DamageIndexType[] = [
+  "physical",
+  "pyro",
+  "hydro",
+  "electro",
+  "cryo",
+  "dendro",
+  "anemo",
+  "geo",
+];
+const EFFICIENCY_LINE_COLORS = {
+  domainsOnly: "var(--chart-1)",
+  domainsStrongbox: "var(--chart-2)",
+  transmuterOnly: "var(--chart-3)",
+  combined: "var(--chart-4)",
+} as const;
 
 const SUBSTAT_OPTIONS: readonly SubStat[] = [
   SubStat.FlatHp,
@@ -117,6 +175,14 @@ const MAIN_OPTIONS_BY_SLOT: Record<Slot, MainStat[]> = {
   ],
 };
 
+const PREFERRED_MAIN_BY_SLOT: Record<Slot, MainStat> = {
+  [Slot.Flower]: MainStat.FlatHp,
+  [Slot.Plume]: MainStat.FlatAtk,
+  [Slot.Sands]: MainStat.AtkPercent,
+  [Slot.Goblet]: MainStat.HpPercent,
+  [Slot.Circlet]: MainStat.CritRate,
+};
+
 const SLOT_LABEL_KEYS: Record<Slot, string> = {
   [Slot.Flower]: "terms.slot.flower",
   [Slot.Plume]: "terms.slot.plume",
@@ -158,6 +224,28 @@ const SUBSTAT_LABEL_KEYS: Record<SubStat, string> = {
   [SubStat.ElementalMastery]: "terms.stat.elementalMastery",
   [SubStat.CritRate]: "terms.stat.critRate",
   [SubStat.CritDmg]: "terms.stat.critDmg",
+};
+
+const STAT_KEY_LABEL_KEYS: Record<StatKey, string> = {
+  hp_flat: "terms.stat.flatHp",
+  hp_pct: "terms.stat.hpPercent",
+  atk_flat: "terms.stat.flatAtk",
+  atk_pct: "terms.stat.atkPercent",
+  def_flat: "terms.stat.flatDef",
+  def_pct: "terms.stat.defPercent",
+  er_pct: "terms.stat.energyRecharge",
+  em: "terms.stat.elementalMastery",
+  crit_rate_pct: "terms.stat.critRate",
+  crit_dmg_pct: "terms.stat.critDmg",
+  healing_bonus_pct: "terms.stat.healingBonus",
+  dmg_bonus_physical_pct: "terms.stat.physicalDmgBonus",
+  dmg_bonus_pyro_pct: "terms.stat.pyroDmgBonus",
+  dmg_bonus_hydro_pct: "terms.stat.hydroDmgBonus",
+  dmg_bonus_electro_pct: "terms.stat.electroDmgBonus",
+  dmg_bonus_cryo_pct: "terms.stat.cryoDmgBonus",
+  dmg_bonus_dendro_pct: "terms.stat.dendroDmgBonus",
+  dmg_bonus_anemo_pct: "terms.stat.anemoDmgBonus",
+  dmg_bonus_geo_pct: "terms.stat.geoDmgBonus",
 };
 
 const ATTEMPT_SOURCE_LABEL_KEYS: Record<AttemptSource, string> = {
@@ -255,13 +343,41 @@ interface ArtifactCalculatorProps {
   appVersion: string;
 }
 
+interface EfficiencyChartPoint {
+  day: number;
+  resin: number;
+  runs: number;
+  domainsOnlyPower: number;
+  domainsStrongboxPower: number;
+  transmuterOnlyPower: number;
+  combinedPower: number;
+}
+
+type MainTab = "plan" | "details" | "advanced";
+
 export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorProps) {
   const { locale, setLocale } = useLocale();
-  const { setTheme, theme } = useTheme();
+  const { setTheme, theme, resolvedTheme } = useTheme();
   const [copied, setCopied] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const [selectedPresetId, setSelectedPresetId] = useState(PRESET_NONE);
-  const [themeMounted, setThemeMounted] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [showEfficiencyCurve, setShowEfficiencyCurve] = useState(false);
+  const [efficiencyDaysInput, setEfficiencyDaysInput] = useState(60);
+  const [efficiencyResinInput, setEfficiencyResinInput] = useState(180);
+  const [showStopPointRecommendation, setShowStopPointRecommendation] = useState(true);
+  const [stopPointThresholdPctInput, setStopPointThresholdPctInput] = useState(0.2);
+  const [stopPointConsecutiveDaysInput, setStopPointConsecutiveDaysInput] = useState(3);
+  const [analysisProfileId, setAnalysisProfileId] = useState<BuildProfileId>("critDps");
+  const [includeGlobalEfficiency, setIncludeGlobalEfficiency] = useState(true);
+  const [globalFlexSlot, setGlobalFlexSlot] = useState<Slot>(Slot.Goblet);
+  const [globalStrategyScope, setGlobalStrategyScope] = useState<FocusGlobalStrategyScope>("domainsStrongbox");
+  const [activeMainTab, setActiveMainTab] = useState<MainTab>("plan");
+  const [damageIndexScalingStat, setDamageIndexScalingStat] = useState<DamageIndexScalingStat>("atk");
+  const [damageIndexDamageType, setDamageIndexDamageType] = useState<DamageIndexType>("physical");
+  const [damageIndexUseCrit, setDamageIndexUseCrit] = useState(true);
+  const [damageIndexMultiplier, setDamageIndexMultiplier] = useState(1);
+  const [damageIndexFlat, setDamageIndexFlat] = useState(0);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shareCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -271,10 +387,14 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
     resolver: zodResolver(formSchema),
   });
   const tr = (key: string, vars?: Record<string, string | number>) => t(locale, key, vars);
+  const activeEnka = useActiveEnkaCharacter(locale);
+  const gameDataLite = useMemo(() => loadGameDataLite(), []);
   const selectedTheme: ShareTheme = isShareTheme(theme) ? theme : "system";
+  const debugThemeValue = mounted ? resolvedTheme ?? theme ?? "system" : "\u2014";
+  const debugLocaleValue = mounted ? locale : "\u2014";
 
   useEffect(() => {
-    setThemeMounted(true);
+    setMounted(true);
   }, []);
 
   useEffect(() => {
@@ -329,13 +449,23 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
   const optimizerObjective = form.watch("optimizerObjective");
 
   useEffect(() => {
-    const allowed = MAIN_OPTIONS_BY_SLOT[slot];
-    if (!allowed.includes(main)) {
-      form.setValue("main", allowed[0], { shouldValidate: true });
+    const fixedMain = normalizeMainForSlot(slot, main);
+    if (fixedMain !== main) {
+      form.setValue("main", fixedMain, { shouldValidate: true });
+      return;
     }
+
+    const allowed = MAIN_OPTIONS_BY_SLOT[slot];
+    if (allowed.includes(main)) {
+      return;
+    }
+
+    const preferredFallback = PREFERRED_MAIN_BY_SLOT[slot];
+    const nextMain = allowed.includes(preferredFallback) ? preferredFallback : allowed[0];
+    form.setValue("main", nextMain, { shouldValidate: true });
   }, [slot, main, form]);
 
-  const effectiveMain = slot === Slot.Flower ? MainStat.FlatHp : slot === Slot.Plume ? MainStat.FlatAtk : main;
+  const effectiveMain = normalizeMainForSlot(slot, main);
   const excludedSub = excludedSubStatForMain(effectiveMain);
 
   useEffect(() => {
@@ -441,6 +571,10 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
   const recycleRate = clampNumber(recycleRatePctInput, 0, 100) / 100;
   const transmuterCraftCap = clampInteger(transmuterMaxCrafts, 0, Number.MAX_SAFE_INTEGER);
   const cvThreshold = clampNumber(cvThresholdInput, 0, 200);
+  const efficiencyDays = clampInteger(efficiencyDaysInput, 1, 365);
+  const efficiencyResinPerDay = clampInteger(efficiencyResinInput, 60, 400);
+  const stopPointThresholdPerDay = clampNumber(stopPointThresholdPctInput, 0, 100) / 100;
+  const stopPointConsecutiveDays = clampInteger(stopPointConsecutiveDaysInput, 1, 30);
 
   const effectiveRule =
     selectedCount === 0
@@ -658,6 +792,27 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
     upgradeRequirement,
   ]);
 
+  const optimizerBaseInput = useMemo(
+    () => ({
+      objective: optimizerObjective,
+      params,
+      upgrade: upgradeRequirement,
+      recycleRate,
+      transmuterConfig,
+      transmuterChoice,
+      cvThreshold,
+    }),
+    [
+      cvThreshold,
+      optimizerObjective,
+      params,
+      recycleRate,
+      transmuterChoice,
+      transmuterConfig,
+      upgradeRequirement,
+    ],
+  );
+
   const optimizerResults = useMemo(() => {
     if (!optimizerEnabled) {
       return {
@@ -680,16 +835,7 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
     }
 
     try {
-      const all = evaluateStrategies({
-        objective: optimizerObjective,
-        params,
-        upgrade: upgradeRequirement,
-        runs,
-        recycleRate,
-        transmuterConfig,
-        transmuterChoice,
-        cvThreshold,
-      });
+      const all = evaluateStrategies({ ...optimizerBaseInput, runs });
       return {
         all,
         best: bestStrategy(all),
@@ -702,17 +848,7 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
         error: error instanceof Error ? error.message : "Failed to evaluate strategies.",
       };
     }
-  }, [
-    cvThreshold,
-    optimizerEnabled,
-    optimizerObjective,
-    params,
-    recycleRate,
-    runs,
-    transmuterChoice,
-    transmuterConfig,
-    upgradeRequirement,
-  ]);
+  }, [optimizerBaseInput, optimizerEnabled, runs]);
 
   const optimizerRunTargets = useMemo(() => {
     if (!optimizerEnabled) {
@@ -725,14 +861,8 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
     }
 
     const input = {
-      objective: optimizerObjective,
-      params,
-      upgrade: upgradeRequirement,
+      ...optimizerBaseInput,
       runs,
-      recycleRate,
-      transmuterConfig,
-      transmuterChoice,
-      cvThreshold,
     } as const;
 
     const strategyNames = [
@@ -748,17 +878,107 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
       runs90: runsForTargetChanceStrategy(input, name, 0.9),
       runsTarget: runsForTargetChanceStrategy(input, name, targetProb),
     }));
+  }, [optimizerBaseInput, optimizerEnabled, runs, targetProb]);
+
+  const efficiencyCurveResults = useMemo(() => {
+    if (!showEfficiencyCurve) {
+      return {
+        curve: null as ReturnType<typeof generateEfficiencyCurve> | null,
+        chartData: [] as EfficiencyChartPoint[],
+        error: null as string | null,
+      };
+    }
+
+    try {
+      const curve = generateEfficiencyCurve({
+        baseInput: optimizerBaseInput,
+        resinPerDay: efficiencyResinPerDay,
+        daysMax: efficiencyDays,
+        stepDays: 1,
+      });
+
+      const chartData = curve.series.map((point) => ({
+        day: point.day,
+        resin: point.resin,
+        runs: point.runs,
+        domainsOnlyPower: point.domainsOnly * 100,
+        domainsStrongboxPower: point.domainsStrongbox * 100,
+        transmuterOnlyPower: point.transmuterOnly * 100,
+        combinedPower: point.combined * 100,
+      }));
+
+      return {
+        curve,
+        chartData,
+        error: null as string | null,
+      };
+    } catch (error) {
+      return {
+        curve: null,
+        chartData: [],
+        error: error instanceof Error ? error.message : "Failed to generate efficiency curve.",
+      };
+    }
+  }, [efficiencyDays, efficiencyResinPerDay, optimizerBaseInput, showEfficiencyCurve]);
+
+  const stopPointStrategyKey = useMemo<
+    "domainsOnly" | "domainsStrongbox" | "combined"
+  >(() => {
+    if (farmStrategy === "combined") {
+      return "combined";
+    }
+    if (globalStrategyScope === "domainsOnly") {
+      return "domainsOnly";
+    }
+    return "domainsStrongbox";
+  }, [farmStrategy, globalStrategyScope]);
+
+  const stopPointStrategyLabel = useMemo(() => {
+    if (stopPointStrategyKey === "domainsOnly") {
+      return tr("results.strategyDomainsOnly");
+    }
+    if (stopPointStrategyKey === "domainsStrongbox") {
+      return tr("results.strategyDomainsStrongbox");
+    }
+    return tr("results.strategyCombined");
+  }, [stopPointStrategyKey, tr]);
+
+  const stopPointRecommendation = useMemo(() => {
+    if (!showEfficiencyCurve || !showStopPointRecommendation || !efficiencyCurveResults.curve) {
+      return null;
+    }
+
+    const series = efficiencyCurveResults.curve.series.map((point) => ({
+      day: point.day,
+      resin: point.resin,
+      runs: point.runs,
+      value:
+        stopPointStrategyKey === "domainsOnly"
+          ? point.domainsOnly
+          : stopPointStrategyKey === "domainsStrongbox"
+            ? point.domainsStrongbox
+            : point.combined,
+    }));
+
+    try {
+      return findStopPoint({
+        series,
+        thresholdPerDay: stopPointThresholdPerDay,
+        consecutiveDays: stopPointConsecutiveDays,
+        minDay: 7,
+        fallbackDay: efficiencyDays,
+      });
+    } catch {
+      return null;
+    }
   }, [
-    cvThreshold,
-    optimizerEnabled,
-    optimizerObjective,
-    params,
-    recycleRate,
-    runs,
-    targetProb,
-    transmuterChoice,
-    transmuterConfig,
-    upgradeRequirement,
+    efficiencyCurveResults.curve,
+    efficiencyDays,
+    showEfficiencyCurve,
+    showStopPointRecommendation,
+    stopPointConsecutiveDays,
+    stopPointStrategyKey,
+    stopPointThresholdPerDay,
   ]);
 
   const cvThresholdLabel = Number.isFinite(cvThresholdInput)
@@ -857,6 +1077,236 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
     applyPreset(preset);
   };
 
+  const suggestedPresetId = useMemo(
+    () => suggestPresetFromCharacter(activeEnka.selectedCharacter),
+    [activeEnka.selectedCharacter],
+  );
+  const suggestedPresetLabelKey = suggestedPresetId ? PRESET_NAME_KEYS_BY_ID[suggestedPresetId] : null;
+  const damageIndexConfig = useMemo<ExpectedDamageSimpleObjectiveConfig>(
+    () => ({
+      id: "expected_damage_simple",
+      scaling: {
+        stat: damageIndexScalingStat,
+        multiplier: damageIndexMultiplier,
+        flat: damageIndexFlat,
+      },
+      damageType: damageIndexDamageType,
+      useCrit: damageIndexUseCrit,
+    }),
+    [damageIndexDamageType, damageIndexFlat, damageIndexMultiplier, damageIndexScalingStat, damageIndexUseCrit],
+  );
+  const damageIndexResult = useMemo(
+    () => computeDamageIndexFromEnka(activeEnka.selectedCharacter, damageIndexConfig),
+    [activeEnka.selectedCharacter, damageIndexConfig],
+  );
+  const artifactPriorityReport = useMemo<ArtifactPriorityReport | null>(() => {
+    if (!activeEnka.selectedCharacter) {
+      return null;
+    }
+    return analyzeArtifactPriorities(activeEnka.selectedCharacter, analysisProfileId);
+  }, [activeEnka.selectedCharacter, analysisProfileId]);
+  const resinRecommendationReport = useMemo<ResinRecommendationReport | null>(() => {
+    if (!artifactPriorityReport) {
+      return null;
+    }
+    return computeResinRecommendations(
+      artifactPriorityReport,
+      optimizerBaseInput,
+      efficiencyResinPerDay,
+    );
+  }, [artifactPriorityReport, efficiencyResinPerDay, optimizerBaseInput]);
+  const focusGlobalEfficiencyReport = useMemo<FocusGlobalEfficiencyReport | null>(() => {
+    if (!artifactPriorityReport) {
+      return null;
+    }
+    return computeFocusGlobalEfficiency(
+      artifactPriorityReport,
+      slot,
+      optimizerBaseInput,
+      efficiencyResinPerDay,
+      globalFlexSlot,
+      globalStrategyScope,
+    );
+  }, [
+    artifactPriorityReport,
+    efficiencyResinPerDay,
+    globalFlexSlot,
+    globalStrategyScope,
+    optimizerBaseInput,
+    slot,
+  ]);
+  const focusGlobalEfficiencySummary = useMemo(() => {
+    if (!focusGlobalEfficiencyReport) {
+      return null;
+    }
+
+    const focusAttempt = focusGlobalEfficiencyReport.totals.expectedGainAttemptFocus;
+    const collateralAttempt = includeGlobalEfficiency
+      ? focusGlobalEfficiencyReport.totals.expectedGainAttemptCollateral
+      : 0;
+    const totalAttempt = focusAttempt + collateralAttempt;
+    const expectedGainPerRun = 0.935 * totalAttempt + 0.065 * (2 * totalAttempt);
+    const expectedGainPerDay = expectedGainPerRun * (focusGlobalEfficiencyReport.resinPerDay / 20);
+    const focusSharePct = totalAttempt <= 0 ? 0 : (focusAttempt / totalAttempt) * 100;
+    const collateralSharePct = totalAttempt <= 0 ? 0 : (collateralAttempt / totalAttempt) * 100;
+    const topCollateralSlots = includeGlobalEfficiency
+      ? [...focusGlobalEfficiencyReport.perSlot]
+          .filter((item) => !item.isFocus)
+          .sort((a, b) => b.expectedGainAttempt - a.expectedGainAttempt)
+          .slice(0, 2)
+      : [];
+
+    const pAttemptAny = clampNumber(
+      includeGlobalEfficiency
+        ? focusGlobalEfficiencyReport.totals.pAttemptAny
+        : focusGlobalEfficiencyReport.perSlot.find((item) => item.isFocus)?.pAttempt ?? 0,
+      0,
+      1,
+    );
+
+    return {
+      expectedGainPerDay,
+      focusSharePct,
+      collateralSharePct,
+      topCollateralSlots,
+      pAttemptAny,
+      focusAttempt,
+      collateralAttempt,
+      totalAttempt,
+    };
+  }, [focusGlobalEfficiencyReport, includeGlobalEfficiency]);
+
+  const focusGlobalScopeStrategyName = useMemo(() => {
+    return globalStrategyScope === "domainsStrongbox" ? "Domains + Strongbox" : "Domains only";
+  }, [globalStrategyScope]);
+  const compactArtifactChips = useMemo(() => {
+    const bySlot = new Map<
+      Slot,
+      {
+        mainLabel: string;
+        setLabel: string | null;
+        setIconUrl: string | null;
+      }
+    >();
+    for (const artifact of activeEnka.selectedCharacter?.artifacts ?? []) {
+      const artifactSlot = mapEnkaEquipTypeToSlot(artifact.equipType);
+      if (!artifactSlot || bySlot.has(artifactSlot)) {
+        continue;
+      }
+
+      const mainLabel = artifact.main?.key
+        ? localizeMainStatFromEnkaKey(artifact.main.key, locale)
+        : "\u2014";
+      const resolvedSet = resolveArtifactSet(artifact.setId, gameDataLite);
+      const setLabel =
+        localizeGameDataName(resolvedSet?.raw, locale as "en" | "pt-BR") ??
+        artifact.setName ??
+        null;
+      const setIconUrl = resolvedSet?.iconUrl ?? artifact.setIconUrl ?? null;
+      bySlot.set(artifactSlot, { mainLabel, setLabel, setIconUrl });
+    }
+
+    return SLOT_OPTIONS.map((slotOption) => ({
+      slot: slotOption,
+      mainLabel: bySlot.get(slotOption)?.mainLabel ?? "\u2014",
+      setLabel: bySlot.get(slotOption)?.setLabel ?? null,
+      setIconUrl: bySlot.get(slotOption)?.setIconUrl ?? null,
+    }));
+  }, [activeEnka.selectedCharacter, gameDataLite, locale]);
+  const selectedCharacterResolved = useMemo(
+    () => resolveCharacter(activeEnka.selectedCharacter?.avatarId, gameDataLite),
+    [activeEnka.selectedCharacter?.avatarId, gameDataLite],
+  );
+  const selectedWeaponResolved = useMemo(
+    () => resolveWeapon(activeEnka.selectedCharacter?.weapon?.id, gameDataLite),
+    [activeEnka.selectedCharacter?.weapon?.id, gameDataLite],
+  );
+  const selectedCharacterName = localizeGameDataName(selectedCharacterResolved?.raw, locale as "en" | "pt-BR");
+  const selectedWeaponName = localizeGameDataName(selectedWeaponResolved?.raw, locale as "en" | "pt-BR");
+  const recommendedPlanFocusSlot = artifactPriorityReport?.topPriorities[0] ?? slot;
+  const recommendedPlanFocusReport = artifactPriorityReport?.slots.find(
+    (slotReport) => slotReport.slot === recommendedPlanFocusSlot,
+  );
+  const recommendedPlanFocusSuggestion = recommendedPlanFocusReport?.suggestedFocus;
+  const recommendedPlanStrategyLabel =
+    optimizerEnabled && optimizerResults.best
+      ? strategyLabel(optimizerResults.best.name, locale)
+      : strategyLabel(focusGlobalScopeStrategyName, locale);
+  const recommendedPlanExpectedGainLabel = focusGlobalEfficiencySummary
+    ? formatPct(focusGlobalEfficiencySummary.expectedGainPerDay)
+    : "\u2014";
+  const recommendedPlanStopDayLabel = stopPointRecommendation
+    ? formatRuns(stopPointRecommendation.stopDay)
+    : "\u2014";
+  const recommendedPlanStopThresholdLabel = `${stopPointThresholdPctInput.toFixed(2)}%/day`;
+  const planImportErrorMessage = activeEnka.error
+    ? activeEnka.error === "BAD_UID"
+      ? tr("enkaActive.errorBadUid")
+      : activeEnka.error === "RATE_LIMITED"
+        ? tr("enkaActive.errorRateLimited")
+        : activeEnka.error === "NETWORK_ERROR"
+          ? tr("enkaActive.errorNetwork")
+          : tr("enkaActive.errorGeneric")
+    : null;
+
+  const applySuggestedPreset = () => {
+    if (!suggestedPresetId) {
+      return;
+    }
+    handlePresetSelect(suggestedPresetId);
+  };
+
+  const applyAnalysisFocus = (focus: ArtifactPriorityReport["slots"][number]["suggestedFocus"] | undefined) => {
+    if (!focus) {
+      return;
+    }
+
+    setSelectedPresetId(PRESET_NONE);
+    form.setValue("slot", focus.slot, { shouldValidate: true });
+
+    const currentMain = form.getValues("main");
+    const nextMain = resolveMainForSlot(focus.slot, focus.mainStat ?? currentMain);
+    form.setValue("main", nextMain, { shouldValidate: true });
+
+    const excludedForMain = excludedSubStatForMain(nextMain);
+    const nextDesiredSubs = focus.desiredSubs
+      ? uniqueSubStats(focus.desiredSubs, excludedForMain)
+      : form.getValues("desiredSubs");
+    form.setValue("desiredSubs", nextDesiredSubs, { shouldValidate: true });
+
+    if (focus.subsRule) {
+      if (focus.subsRule.mode === "atLeast") {
+        form.setValue("ruleMode", "atLeast", { shouldValidate: true });
+        form.setValue("atLeastN", clampInteger(focus.subsRule.n, 0, nextDesiredSubs.length), {
+          shouldValidate: true,
+        });
+      } else {
+        form.setValue("ruleMode", "all", { shouldValidate: true });
+        form.setValue("atLeastN", 0, { shouldValidate: true });
+      }
+    }
+
+    if (focus.objectiveMode === "cv") {
+      form.setValue("optimizerEnabled", true, { shouldValidate: true });
+      form.setValue("optimizerObjective", "cv", { shouldValidate: true });
+      form.setValue("cvEnabled", true, { shouldValidate: true });
+      if (focus.cvThreshold !== undefined) {
+        form.setValue("cvThreshold", clampNumber(focus.cvThreshold, 0, 200), { shouldValidate: true });
+      }
+      return;
+    }
+
+    form.setValue("optimizerEnabled", true, { shouldValidate: true });
+    form.setValue("optimizerObjective", "constraints", { shouldValidate: true });
+  };
+  const applyRecommendedPlanFocus = () => {
+    if (!recommendedPlanFocusSuggestion) {
+      return;
+    }
+    applyAnalysisFocus(recommendedPlanFocusSuggestion);
+    setActiveMainTab("advanced");
+  };
+
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 p-4 md:p-8">
       <header className="space-y-3">
@@ -883,7 +1333,7 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
               <Select
                 value={selectedTheme}
                 onValueChange={(value) => setTheme(value)}
-                disabled={!themeMounted}
+                disabled={!mounted}
               >
                 <SelectTrigger className="w-[165px]">
                   <SelectValue />
@@ -915,6 +1365,1001 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
         <p className="text-muted-foreground text-sm">{tr("app.assumptions")}</p>
       </header>
 
+      <Tabs
+        value={activeMainTab}
+        onValueChange={(value) => setActiveMainTab(value as MainTab)}
+        className="space-y-4"
+      >
+        <TabsList className="w-full justify-start">
+          <TabsTrigger value="plan">{tr("tabs.plan")}</TabsTrigger>
+          <TabsTrigger value="details">{tr("tabs.details")}</TabsTrigger>
+          <TabsTrigger value="advanced">{tr("tabs.advanced")}</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="plan" className="space-y-4">
+          {activeEnka.ref && (
+            <Card>
+              <CardHeader className="space-y-1 pb-3">
+                <CardTitle>{tr("planImport.title")}</CardTitle>
+                <CardDescription>{tr("planImport.description")}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4 pt-0">
+                {activeEnka.isLoading && (
+                  <div className="space-y-2">
+                    <div className="h-4 w-56 animate-pulse rounded bg-muted" />
+                    <div className="h-3 w-64 animate-pulse rounded bg-muted" />
+                    <div className="h-3 w-72 animate-pulse rounded bg-muted" />
+                  </div>
+                )}
+
+                {!activeEnka.isLoading && planImportErrorMessage && (
+                  <p className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-sm text-destructive">
+                    {planImportErrorMessage}
+                  </p>
+                )}
+
+                {!activeEnka.isLoading && !activeEnka.error && activeEnka.selectedCharacter && (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                      <div className="flex items-center gap-2">
+                        {selectedCharacterResolved?.iconUrl && (
+                          <img
+                            alt={selectedCharacterName ?? tr("enkaActive.unknown")}
+                            className="h-10 w-10 rounded border object-cover"
+                            src={selectedCharacterResolved.iconUrl}
+                          />
+                        )}
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium">
+                            {selectedCharacterName ??
+                              tr("enkaActive.characterId", {
+                                id: activeEnka.selectedCharacter.avatarId ?? tr("enkaActive.unknown"),
+                              })}
+                          </p>
+                          {selectedCharacterName && (
+                            <p className="text-muted-foreground text-xs">
+                              {tr("enkaActive.characterId", {
+                                id: activeEnka.selectedCharacter.avatarId ?? tr("enkaActive.unknown"),
+                              })}
+                            </p>
+                          )}
+                          <p className="text-muted-foreground text-xs">
+                            {tr("enkaActive.level")}: {activeEnka.selectedCharacter.level ?? "\u2014"}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 rounded-md border px-2 py-1">
+                        {(selectedWeaponResolved?.iconUrl ?? activeEnka.selectedCharacter.weapon?.iconUrl) && (
+                          <img
+                            alt={tr("enkaActive.weapon")}
+                            className="h-8 w-8 rounded border object-cover"
+                            src={selectedWeaponResolved?.iconUrl ?? activeEnka.selectedCharacter.weapon?.iconUrl}
+                          />
+                        )}
+                        <div className="text-xs">
+                          <p className="font-medium">{selectedWeaponName ?? tr("enkaActive.weapon")}</p>
+                          <p className="text-muted-foreground">
+                            {tr("enkaActive.weaponLevel")}: {activeEnka.selectedCharacter.weapon?.level ?? "\u2014"}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            {selectedWeaponResolved?.rarity && (
+                              <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                                {"★".repeat(selectedWeaponResolved.rarity)}
+                              </Badge>
+                            )}
+                            {selectedWeaponResolved?.weaponType && (
+                              <p className="text-muted-foreground">{selectedWeaponResolved.weaponType}</p>
+                            )}
+                          </div>
+                          {activeEnka.selectedCharacter.weapon?.id && (
+                            <p className="text-muted-foreground">ID: {activeEnka.selectedCharacter.weapon.id}</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium">{tr("planImport.artifacts")}</p>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {compactArtifactChips.map((chip) => (
+                          <div key={`plan-chip-${chip.slot}`} className="rounded-md border bg-muted/15 px-2 py-1.5 text-xs">
+                            <p className="font-medium">{localizeSlot(chip.slot, locale)}: {chip.mainLabel}</p>
+                            {chip.setLabel && (
+                              <p className="mt-0.5 inline-flex items-center gap-1 text-muted-foreground">
+                                {chip.setIconUrl && (
+                                  <img
+                                    alt={chip.setLabel}
+                                    className="h-3.5 w-3.5 rounded border object-cover"
+                                    src={chip.setIconUrl}
+                                  />
+                                )}
+                                <span>{tr("enkaActive.set")}: {chip.setLabel}</span>
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {!activeEnka.isLoading && !activeEnka.error && !activeEnka.selectedCharacter && (
+                  <p className="text-muted-foreground text-sm">{tr("planImport.noCharacter")}</p>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  <Button asChild size="sm" type="button" variant="outline">
+                    <Link href="/import">{tr("enkaActive.changeCharacter")}</Link>
+                  </Button>
+                  <Button size="sm" type="button" variant="outline" onClick={activeEnka.refresh}>
+                    {tr("enkaActive.refresh")}
+                  </Button>
+                  <Button size="sm" type="button" variant="destructive" onClick={activeEnka.clear}>
+                    {tr("enkaActive.clearImport")}
+                  </Button>
+                  <Button size="sm" type="button" variant="ghost" onClick={() => setActiveMainTab("details")}>
+                    {tr("planImport.viewFullDetails")}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {artifactPriorityReport && (
+            <>
+              <Card>
+                <CardHeader className="space-y-1">
+                  <CardTitle className="text-xl">{tr("recommendedPlan.title")}</CardTitle>
+                  <CardDescription>{tr("recommendedPlan.description")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2 rounded-md border p-4">
+                    <p className="text-sm">
+                      <span className="text-muted-foreground">{tr("recommendedPlan.farmStrategy")}: </span>
+                      <span className="font-medium">{recommendedPlanStrategyLabel}</span>
+                    </p>
+                    <p className="text-sm">
+                      <span className="text-muted-foreground">{tr("recommendedPlan.focusSlot")}: </span>
+                      <span className="font-medium">{localizeSlot(recommendedPlanFocusSlot, locale)}</span>
+                    </p>
+                    <p className="text-sm">
+                      <span className="text-muted-foreground">{tr("recommendedPlan.stopAround")}: </span>
+                      <span className="font-medium">
+                        {tr("recommendedPlan.stopWithThreshold", {
+                          days: recommendedPlanStopDayLabel,
+                          threshold: recommendedPlanStopThresholdLabel,
+                        })}
+                      </span>
+                    </p>
+                    {focusGlobalEfficiencySummary && (
+                      <p className="text-muted-foreground text-xs">
+                        {tr("recommendedPlan.expectedGainPerDay", { value: recommendedPlanExpectedGainLabel })}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      disabled={!recommendedPlanFocusSuggestion}
+                      onClick={applyRecommendedPlanFocus}
+                    >
+                      {tr("recommendedPlan.applyFocus")}
+                    </Button>
+                    <Button size="sm" type="button" variant="ghost" onClick={() => setActiveMainTab("advanced")}>
+                      {tr("recommendedPlan.advancedSettings")}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="space-y-1">
+                  <CardTitle>{tr("recommendedPlan.prioritiesTitle")}</CardTitle>
+                  <CardDescription>{tr("recommendedPlan.prioritiesDescription")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {artifactPriorityReport.topPriorities.slice(0, 2).map((slotName) => {
+                      const slotReport = artifactPriorityReport.slots.find((item) => item.slot === slotName);
+                      if (!slotReport) {
+                        return null;
+                      }
+
+                      return (
+                        <div key={`plan-priority-${slotName}`} className="space-y-2 rounded-md border p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-medium">{localizeSlot(slotName, locale)}</p>
+                            <Badge variant={priorityBadgeVariant(slotReport.priority)}>
+                              {tr(`analysis.priority.${slotReport.priority}`)}
+                            </Badge>
+                          </div>
+                          <p className="text-muted-foreground text-xs">
+                            {tr("recommendedPlan.priorityScore", {
+                              value: (slotReport.slotScore * 100).toFixed(1),
+                            })}
+                          </p>
+                          <p className="text-muted-foreground text-xs">
+                            {slotReport.reasons.length > 0
+                              ? slotReport.reasons.map((reason) => tr(`analysis.reasons.${reason}`)).join(", ")
+                              : tr("analysis.reasons.ok")}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button size="sm" type="button" variant="outline" onClick={() => setActiveMainTab("details")}>
+                      {tr("recommendedPlan.viewAllDetails")}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
+
+          <Card className="shadow-none">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">{tr("results.efficiencyCurve")}</CardTitle>
+              <CardDescription>{tr("results.compareStrategies")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 pt-0">
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  checked={showEfficiencyCurve}
+                  onCheckedChange={(value) => setShowEfficiencyCurve(value === true)}
+                />
+                <label className="text-sm font-medium">{tr("results.showEfficiencyCurve")}</label>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[minmax(0,180px)_minmax(0,180px)_1fr]">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">{tr("results.daysHorizon")}</label>
+                  <Input
+                    max={365}
+                    min={1}
+                    type="number"
+                    value={efficiencyDaysInput}
+                    onChange={(event) => setEfficiencyDaysInput(clampInteger(Number(event.target.value), 1, 365))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">{tr("results.resinPerDay")}</label>
+                  <Input
+                    max={400}
+                    min={60}
+                    type="number"
+                    value={efficiencyResinInput}
+                    onChange={(event) => setEfficiencyResinInput(clampInteger(Number(event.target.value), 60, 400))}
+                  />
+                </div>
+                <p className="text-muted-foreground text-xs md:self-end">{tr("results.naturalRegen")}</p>
+              </div>
+
+              {showEfficiencyCurve && efficiencyCurveResults.error && (
+                <p className="text-destructive text-xs">{efficiencyCurveResults.error}</p>
+              )}
+
+              {showEfficiencyCurve && !efficiencyCurveResults.error && (
+                <>
+                  <div className="h-72 w-full">
+                    <ResponsiveContainer height="100%" width="100%">
+                      <LineChart data={efficiencyCurveResults.chartData} margin={{ top: 8, right: 20, left: 0, bottom: 4 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis allowDecimals={false} dataKey="day" />
+                        <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} width={52} />
+                        <Tooltip
+                          formatter={(value, name) => [
+                            `${(Number(value) || 0).toFixed(2)}%`,
+                            name ?? "",
+                          ]}
+                          labelFormatter={(_, payload) => {
+                            const point = payload?.[0]?.payload as EfficiencyChartPoint | undefined;
+                            if (!point) {
+                              return "";
+                            }
+                            return `${tr("results.day")}: ${point.day} | ${tr("results.resin")}: ${formatRuns(point.resin)} | ${tr("inputs.runs")}: ${formatRuns(point.runs)}`;
+                          }}
+                        />
+                        <Line
+                          dataKey="domainsOnlyPower"
+                          dot={false}
+                          name={tr("results.strategyDomainsOnly")}
+                          stroke={EFFICIENCY_LINE_COLORS.domainsOnly}
+                          strokeWidth={2}
+                          type="monotone"
+                        />
+                        <Line
+                          dataKey="domainsStrongboxPower"
+                          dot={false}
+                          name={tr("results.strategyDomainsStrongbox")}
+                          stroke={EFFICIENCY_LINE_COLORS.domainsStrongbox}
+                          strokeWidth={2}
+                          type="monotone"
+                        />
+                        <Line
+                          dataKey="transmuterOnlyPower"
+                          dot={false}
+                          name={tr("results.strategyTransmuterOnly")}
+                          stroke={EFFICIENCY_LINE_COLORS.transmuterOnly}
+                          strokeWidth={2}
+                          type="monotone"
+                        />
+                        <Line
+                          dataKey="combinedPower"
+                          dot={false}
+                          name={tr("results.strategyCombined")}
+                          stroke={EFFICIENCY_LINE_COLORS.combined}
+                          strokeWidth={2}
+                          type="monotone"
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {efficiencyCurveResults.curve && (
+                    <div className="space-y-2">
+                      <div>
+                        <p className="text-sm font-medium">{tr("results.milestones")}</p>
+                        <p className="text-muted-foreground text-xs">{tr("results.daysToReach")}</p>
+                      </div>
+                      <div className="overflow-x-auto rounded-md border">
+                        <table className="w-full min-w-[580px] text-xs">
+                          <thead>
+                            <tr className="bg-muted/50">
+                              <th className="px-3 py-2 text-left">{tr("inputs.farmStrategy")}</th>
+                              <th className="px-3 py-2 text-left">50%</th>
+                              <th className="px-3 py-2 text-left">75%</th>
+                              <th className="px-3 py-2 text-left">90%</th>
+                              <th className="px-3 py-2 text-left">95%</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[
+                              {
+                                label: tr("results.strategyDomainsOnly"),
+                                milestones: efficiencyCurveResults.curve.milestones.domainsOnly,
+                              },
+                              {
+                                label: tr("results.strategyDomainsStrongbox"),
+                                milestones: efficiencyCurveResults.curve.milestones.domainsStrongbox,
+                              },
+                              {
+                                label: tr("results.strategyTransmuterOnly"),
+                                milestones: efficiencyCurveResults.curve.milestones.transmuterOnly,
+                              },
+                              {
+                                label: tr("results.strategyCombined"),
+                                milestones: efficiencyCurveResults.curve.milestones.combined,
+                              },
+                            ].map((row) => (
+                              <tr key={`milestone-plan-${row.label}`} className="border-t">
+                                <td className="px-3 py-2 font-medium">{row.label}</td>
+                                <td className="px-3 py-2">
+                                  {formatDaysWithResin(row.milestones.p50, efficiencyResinPerDay)}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {formatDaysWithResin(row.milestones.p75, efficiencyResinPerDay)}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {formatDaysWithResin(row.milestones.p90, efficiencyResinPerDay)}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {formatDaysWithResin(row.milestones.p95, efficiencyResinPerDay)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="shadow-none">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">{tr("results.stopPoint.title")}</CardTitle>
+              <CardDescription>{tr("results.stopPoint.description")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 pt-0">
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  checked={showStopPointRecommendation}
+                  onCheckedChange={(value) => setShowStopPointRecommendation(value === true)}
+                />
+                <label className="text-sm font-medium">{tr("results.stopPoint.show")}</label>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[minmax(0,200px)_minmax(0,220px)_1fr]">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">{tr("results.stopPoint.threshold")}</label>
+                  <Input
+                    min={0}
+                    step={0.05}
+                    type="number"
+                    value={stopPointThresholdPctInput}
+                    onChange={(event) =>
+                      setStopPointThresholdPctInput(
+                        clampNumber(Number(event.target.value), 0, 100),
+                      )
+                    }
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">{tr("results.stopPoint.consecutiveDays")}</label>
+                  <Input
+                    min={1}
+                    type="number"
+                    value={stopPointConsecutiveDaysInput}
+                    onChange={(event) =>
+                      setStopPointConsecutiveDaysInput(
+                        clampInteger(Number(event.target.value), 1, 30),
+                      )
+                    }
+                  />
+                </div>
+                <div className="md:self-end">
+                  <p className="text-muted-foreground text-xs">
+                    {tr("results.stopPoint.strategy", { value: stopPointStrategyLabel })}
+                  </p>
+                </div>
+              </div>
+
+              {showStopPointRecommendation && !showEfficiencyCurve && (
+                <p className="text-muted-foreground text-sm">{tr("results.stopPoint.enableCurve")}</p>
+              )}
+
+              {showStopPointRecommendation &&
+                showEfficiencyCurve &&
+                !efficiencyCurveResults.error &&
+                stopPointRecommendation && (
+                  <div className="space-y-2 rounded-md border p-3 text-sm">
+                    <p className="font-medium">
+                      {tr("results.stopPoint.stopAround", { days: formatRuns(stopPointRecommendation.stopDay) })}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      {tr("results.stopPoint.valueAtStop", {
+                        value: formatPct(stopPointRecommendation.at.value),
+                      })}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      {tr("results.stopPoint.costAtStop", {
+                        resin: formatRuns(stopPointRecommendation.at.resin),
+                        runs: formatRuns(stopPointRecommendation.at.runs),
+                      })}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      {tr("results.stopPoint.marginalAtStop", {
+                        value: formatPct(stopPointRecommendation.at.marginal),
+                      })}
+                    </p>
+                    <p className="text-muted-foreground text-xs">{tr("results.stopPoint.explanation")}</p>
+                  </div>
+                )}
+            </CardContent>
+          </Card>
+
+          {farmStrategy === "combined" && (
+            <p className="text-muted-foreground text-xs">{tr("results.optimizerCombinedNote")}</p>
+          )}
+        </TabsContent>
+
+        <TabsContent value="details" className="space-y-4">
+      {activeEnka.ref && (
+        <div className="space-y-3">
+          <EnkaActiveCard
+            data={activeEnka.data}
+            error={activeEnka.error}
+            isLoading={activeEnka.isLoading}
+            locale={locale}
+            selectedCharacter={activeEnka.selectedCharacter}
+            uid={activeEnka.ref.uid}
+            onClear={activeEnka.clear}
+            onRefresh={activeEnka.refresh}
+          />
+          {activeEnka.selectedCharacter && suggestedPresetLabelKey && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">
+                {tr("enkaActive.suggestedPreset")}: {tr(suggestedPresetLabelKey)}
+              </Badge>
+              <Button size="sm" type="button" variant="outline" onClick={applySuggestedPreset}>
+                {tr("enkaActive.applySuggestedPreset")}
+              </Button>
+            </div>
+          )}
+          {activeEnka.selectedCharacter && (
+            <Card className="shadow-none">
+              <CardHeader className="space-y-1">
+                <CardTitle>{tr("damageIndex.title")}</CardTitle>
+                <CardDescription>{tr("damageIndex.description")}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">{tr("damageIndex.scalingStat")}</label>
+                    <Select
+                      value={damageIndexScalingStat}
+                      onValueChange={(value) => setDamageIndexScalingStat(value as DamageIndexScalingStat)}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {DAMAGE_INDEX_SCALING_OPTIONS.map((option) => (
+                          <SelectItem key={`damage-index-scaling-${option}`} value={option}>
+                            {tr(`damageIndex.scalingOptions.${option}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">{tr("damageIndex.damageType")}</label>
+                    <Select
+                      value={damageIndexDamageType}
+                      onValueChange={(value) => setDamageIndexDamageType(value as DamageIndexType)}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {DAMAGE_INDEX_DAMAGE_TYPES.map((option) => (
+                          <SelectItem key={`damage-index-type-${option}`} value={option}>
+                            {tr(`damageIndex.damageTypeOptions.${option}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={damageIndexUseCrit}
+                    onCheckedChange={(value) => setDamageIndexUseCrit(value === true)}
+                  />
+                  <label className="text-sm font-medium">{tr("damageIndex.includeCrit")}</label>
+                </div>
+
+                <details className="rounded-md border p-3">
+                  <summary className="cursor-pointer text-sm font-medium">
+                    {tr("damageIndex.advanced")}
+                  </summary>
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium">{tr("damageIndex.multiplier")}</label>
+                      <Input
+                        step={0.1}
+                        type="number"
+                        value={damageIndexMultiplier}
+                        onChange={(event) =>
+                          setDamageIndexMultiplier(parseNumberOrFallback(event.target.value, 1))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium">{tr("damageIndex.flat")}</label>
+                      <Input
+                        step={1}
+                        type="number"
+                        value={damageIndexFlat}
+                        onChange={(event) => setDamageIndexFlat(parseNumberOrFallback(event.target.value, 0))}
+                      />
+                    </div>
+                  </div>
+                </details>
+
+                <div className="rounded-md border bg-muted/20 p-4">
+                  <p className="text-muted-foreground text-xs">{tr("damageIndex.score")}</p>
+                  <p className="text-2xl font-semibold">
+                    {formatDamageIndexNumber(damageIndexResult.score, locale)}
+                  </p>
+                </div>
+
+                <div className="grid gap-2 text-sm sm:grid-cols-3">
+                  <div className="rounded-md border p-3">
+                    <p className="text-muted-foreground text-xs">{tr("damageIndex.base")}</p>
+                    <p className="font-semibold">
+                      {formatDamageIndexNumber(damageIndexResult.breakdown.base, locale)}
+                    </p>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <p className="text-muted-foreground text-xs">{tr("damageIndex.dmgBonus")}</p>
+                    <p className="font-semibold">
+                      {formatDamageIndexPercent(damageIndexResult.breakdown.dmgBonus, locale)}
+                    </p>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <p className="text-muted-foreground text-xs">{tr("damageIndex.critMult")}</p>
+                    <p className="font-semibold">
+                      {formatDamageIndexMultiplier(damageIndexResult.breakdown.critMult, locale)}
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-muted-foreground text-xs">{tr("damageIndex.disclaimer")}</p>
+              </CardContent>
+            </Card>
+          )}
+          {activeEnka.selectedCharacter && artifactPriorityReport && (
+            <>
+              <Card>
+                <CardHeader className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <CardTitle>{tr("analysis.title")}</CardTitle>
+                      <CardDescription>{tr("analysis.description")}</CardDescription>
+                    </div>
+                    <div className="min-w-[220px] space-y-1">
+                      <label className="text-sm font-medium">{tr("analysis.profileLabel")}</label>
+                      <Select
+                        value={analysisProfileId}
+                        onValueChange={(value) => setAnalysisProfileId(value as BuildProfileId)}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {BUILD_PROFILE_OPTIONS.map((profileOption) => (
+                            <SelectItem key={profileOption} value={profileOption}>
+                              {tr(`analysis.profile.${profileOption}`)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-medium">{tr("analysis.currentPower")}</span>
+                      <span className="text-sm">{(artifactPriorityReport.powerCurrent * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full bg-primary"
+                        style={{ width: `${(artifactPriorityReport.powerCurrent * 100).toFixed(1)}%` }}
+                      />
+                    </div>
+                    <p className="text-muted-foreground text-xs">{tr("analysis.powerNote")}</p>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="overflow-x-auto rounded-md border">
+                    <table className="w-full min-w-[760px] text-sm">
+                      <thead className="bg-muted/40">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium">{tr("analysis.table.slot")}</th>
+                          <th className="px-3 py-2 text-left font-medium">{tr("analysis.table.mainStat")}</th>
+                          <th className="px-3 py-2 text-left font-medium">{tr("analysis.table.score")}</th>
+                          <th className="px-3 py-2 text-left font-medium">{tr("analysis.table.priority")}</th>
+                          <th className="px-3 py-2 text-left font-medium">{tr("analysis.table.reasons")}</th>
+                          <th className="px-3 py-2 text-right font-medium">{tr("analysis.table.actions")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {artifactPriorityReport.slots.map((slotReport) => (
+                          <tr key={`analysis-${slotReport.slot}`} className="border-t">
+                            <td className="px-3 py-2">{localizeSlot(slotReport.slot, locale)}</td>
+                            <td className="px-3 py-2">
+                              {slotReport.mainKey ? localizeEvalStatKey(slotReport.mainKey, locale) : tr("enkaActive.unknown")}
+                            </td>
+                            <td className="px-3 py-2">{(slotReport.slotScore * 100).toFixed(1)}%</td>
+                            <td className="px-3 py-2">
+                              <Badge variant={priorityBadgeVariant(slotReport.priority)}>
+                                {tr(`analysis.priority.${slotReport.priority}`)}
+                              </Badge>
+                            </td>
+                            <td className="px-3 py-2 text-muted-foreground">
+                              {slotReport.reasons.length > 0
+                                ? slotReport.reasons.map((reason) => tr(`analysis.reasons.${reason}`)).join(", ")
+                                : tr("analysis.reasons.ok")}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <Button
+                                size="sm"
+                                type="button"
+                                variant="outline"
+                                disabled={!slotReport.suggestedFocus}
+                                onClick={() => applyAnalysisFocus(slotReport.suggestedFocus)}
+                              >
+                                {tr("analysis.focus")}
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="rounded-md border bg-muted/20 p-3 text-sm">
+                    <p className="font-medium">
+                      {tr("analysis.topPriorities", {
+                        value: artifactPriorityReport.topPriorities.map((slotName) => localizeSlot(slotName, locale)).join(", "),
+                      })}
+                    </p>
+                    <p className="text-muted-foreground text-xs">{tr("analysis.tip")}</p>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="space-y-3">
+                  <div className="space-y-1">
+                    <CardTitle>{tr("analysis.focusGlobal.title")}</CardTitle>
+                    <CardDescription>{tr("analysis.focusGlobal.description")}</CardDescription>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      checked={includeGlobalEfficiency}
+                      onCheckedChange={(value) => setIncludeGlobalEfficiency(value === true)}
+                    />
+                    <label className="text-sm font-medium">
+                      {tr("analysis.focusGlobal.includeIncidental")}
+                    </label>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium">{tr("analysis.focusGlobal.flexSlot")}</label>
+                      <Select
+                        value={globalFlexSlot}
+                        onValueChange={(value) => setGlobalFlexSlot(value as Slot)}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {SLOT_OPTIONS.map((slotOption) => (
+                            <SelectItem key={`global-flex-${slotOption}`} value={slotOption}>
+                              {localizeSlot(slotOption, locale)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium">{tr("analysis.focusGlobal.strategyScope")}</label>
+                      <Select
+                        value={globalStrategyScope}
+                        onValueChange={(value) => setGlobalStrategyScope(value as FocusGlobalStrategyScope)}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {GLOBAL_STRATEGY_SCOPE_OPTIONS.map((scopeOption) => (
+                            <SelectItem key={`global-scope-${scopeOption}`} value={scopeOption}>
+                              {tr(`analysis.focusGlobal.scope.${scopeOption}`)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3 pt-0">
+                  {focusGlobalEfficiencySummary && (
+                    <>
+                      <div className="rounded-md border p-3 text-sm">
+                        <p>
+                          <span className="text-muted-foreground">{tr("analysis.focusGlobal.focusedSlot")}: </span>
+                          {localizeSlot(slot, locale)}
+                        </p>
+                        <p>
+                          <span className="text-muted-foreground">{tr("analysis.focusGlobal.activeScope")}: </span>
+                          {strategyLabel(focusGlobalScopeStrategyName, locale)}
+                        </p>
+                        <p className="text-muted-foreground text-xs">
+                          {tr("analysis.focusGlobal.expectedGainPerDay", {
+                            value: formatPct(focusGlobalEfficiencySummary.expectedGainPerDay),
+                          })}
+                        </p>
+                        <p className="text-muted-foreground mt-1 text-xs">
+                          {tr("analysis.focusGlobal.pAttemptAny", {
+                            value: formatPct(focusGlobalEfficiencySummary.pAttemptAny),
+                          })}
+                        </p>
+                      </div>
+
+                      <div className="rounded-md border p-3 text-sm">
+                        <p className="font-medium">{tr("analysis.focusGlobal.breakdown")}</p>
+                        <p className="text-muted-foreground mt-2 text-xs">
+                          {tr("analysis.focusGlobal.focusShare", {
+                            value: formatPct(focusGlobalEfficiencySummary.focusSharePct / 100),
+                          })}
+                        </p>
+                        <p className="text-muted-foreground text-xs">
+                          {tr("analysis.focusGlobal.collateralShare", {
+                            value: formatPct(focusGlobalEfficiencySummary.collateralSharePct / 100),
+                          })}
+                        </p>
+                      </div>
+
+                      <div className="rounded-md border p-3 text-sm">
+                        <p className="font-medium">{tr("analysis.focusGlobal.topCollateral")}</p>
+                        <div className="mt-2 space-y-1">
+                          {focusGlobalEfficiencySummary.topCollateralSlots.length === 0 && (
+                            <p className="text-muted-foreground text-xs">{tr("analysis.focusGlobal.noCollateral")}</p>
+                          )}
+                          {focusGlobalEfficiencySummary.topCollateralSlots.map((item) => (
+                            <p key={`global-contributor-${item.slot}`} className="text-muted-foreground text-xs">
+                              {localizeSlot(item.slot, locale)}:{" "}
+                              {formatPct(item.expectedGainAttempt)}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+
+              {resinRecommendationReport && (
+                <Card>
+                  <CardHeader className="space-y-1">
+                    <CardTitle>{tr("analysis.resin.title")}</CardTitle>
+                    <CardDescription>
+                      {tr("analysis.resin.usingResinPerDay", { value: resinRecommendationReport.resinPerDay })}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {resinRecommendationReport.items.map((item) => (
+                      <div key={`resin-recommendation-${item.slot}`} className="space-y-2 rounded-md border p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="font-medium">{localizeSlot(item.slot, locale)}</p>
+                          <Badge variant={priorityBadgeVariant(item.priority)}>{tr(`analysis.priority.${item.priority}`)}</Badge>
+                        </div>
+                        <p className="text-sm">
+                          <span className="text-muted-foreground">{tr("analysis.resin.bestStrategy")}: </span>
+                          {strategyLabel(item.bestStrategyName, locale)}
+                        </p>
+                        <p className="text-sm">
+                          {tr("analysis.resin.timeEstimate", {
+                            days50: formatRuns(item.days50),
+                            days90: formatRuns(item.days90),
+                          })}
+                        </p>
+                        {item.expectedNote.length > 0 && (
+                          <p className="text-muted-foreground text-xs">
+                            {item.expectedNote.map((note) => strategyNoteLabel(note, locale)).join(" | ")}
+                          </p>
+                        )}
+                        <Button
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                          onClick={() => applyAnalysisFocus(item.focus)}
+                        >
+                          {tr("analysis.resin.focusSlot")}
+                        </Button>
+                      </div>
+                    ))}
+                    {resinRecommendationReport.items.length === 0 && (
+                      <p className="text-muted-foreground text-sm">{tr("analysis.resin.noData")}</p>
+                    )}
+                    <p className="text-muted-foreground text-xs">{tr("analysis.resin.disclaimer")}</p>
+                  </CardContent>
+                </Card>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {optimizerEnabled && (
+        <>
+          <Card className="border-primary/50 bg-primary/5 shadow-none">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">{tr("results.optimizerRecommended")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 pt-0">
+              {optimizerResults.error && (
+                <p className="text-destructive text-xs">{optimizerResults.error}</p>
+              )}
+              {!optimizerResults.error && optimizerResults.best && (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold">{strategyLabel(optimizerResults.best.name, locale)}</p>
+                    <Badge variant="secondary">{formatPct(optimizerResults.best.pSuccess)}</Badge>
+                  </div>
+                  <ul className="list-disc space-y-1 pl-5 text-xs">
+                    <li>{explainWhyWin(optimizerResults.best.name, optimizerResults.best.objective, locale)}</li>
+                    <li>
+                      {tr("results.optimizerResources", {
+                        runs: optimizerResults.best.details?.runs ?? runs,
+                        recycle: Math.round((optimizerResults.best.details?.recycleRate ?? recycleRate) * 100),
+                        crafts: optimizerResults.best.details?.crafts ?? 0,
+                      })}
+                    </li>
+                  </ul>
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="shadow-none">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">{tr("results.optimizerAllStrategies")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 pt-0">
+              {optimizerResults.all.map((result) => (
+                <div
+                  key={`optimizer-details-${result.name}`}
+                  className="grid gap-2 rounded-md border px-3 py-2 text-xs md:grid-cols-[1.2fr_0.6fr_1fr]"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{strategyLabel(result.name, locale)}</span>
+                      {requiresTransmuter(result.name) && (
+                        <Badge variant="outline">{tr("results.optimizerRequiresTransmuter")}</Badge>
+                      )}
+                    </div>
+                    {result.details?.note && (
+                      <p className="text-muted-foreground">{strategyNoteLabel(result.details.note, locale)}</p>
+                    )}
+                  </div>
+                  <div className="font-semibold">{formatPct(result.pSuccess)}</div>
+                  <div className="text-muted-foreground">
+                    {tr("results.optimizerListDetail", {
+                      runs: result.details?.runs ?? runs,
+                      recycle: Math.round((result.details?.recycleRate ?? recycleRate) * 100),
+                      crafts: result.details?.crafts ?? 0,
+                    })}
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card className="shadow-none">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">{tr("results.optimizerRunsNeeded")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 pt-0">
+              {optimizerRunTargets.map((targetRow) => {
+                const detail = optimizerResults.all.find((row) => row.name === targetRow.name)?.details;
+                const transmuterOnly = targetRow.name === "Transmuter only (period)";
+                const combined = targetRow.name === "Combined (Domains+Strongbox + Transmuter)";
+
+                return (
+                  <div key={`run-target-details-${targetRow.name}`} className="space-y-2 rounded-md border px-3 py-2">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="font-medium text-sm">{strategyLabel(targetRow.name, locale)}</span>
+                      {transmuterOnly && <Badge variant="outline">{tr("results.optimizerFixedByCrafts")}</Badge>}
+                      {combined && <Badge variant="outline">{tr("results.optimizerCraftsFixed")}</Badge>}
+                    </div>
+                    <div className="grid gap-2 text-xs sm:grid-cols-3">
+                      <div>
+                        <p className="text-muted-foreground">{tr("results.metricRuns50")}</p>
+                        <p className="font-semibold">{formatRunsWithResin(targetRow.runs50, tr("inputs.resin"))}</p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">{tr("results.metricRuns90")}</p>
+                        <p className="font-semibold">{formatRunsWithResin(targetRow.runs90, tr("inputs.resin"))}</p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">
+                          {tr("results.optimizerRunsForTarget", { target: formatPct(targetProb) })}
+                        </p>
+                        <p className="font-semibold">
+                          {formatRunsWithResin(targetRow.runsTarget, tr("inputs.resin"))}
+                        </p>
+                      </div>
+                    </div>
+                    {detail?.note && (
+                      <p className="text-muted-foreground text-xs">{strategyNoteLabel(detail.note, locale)}</p>
+                    )}
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        </>
+      )}
+        </TabsContent>
+
+        <TabsContent value="advanced" className="space-y-4">
       <div className="grid gap-6 lg:grid-cols-[1.1fr_1fr]">
         <Card>
           <CardHeader>
@@ -1632,132 +3077,19 @@ export function ArtifactCalculator({ appName, appVersion }: ArtifactCalculatorPr
               </CardContent>
             </Card>
 
-            {optimizerEnabled && (
-              <Card className="border-primary/50 bg-primary/5 shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base">{tr("results.optimizerRecommended")}</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 pt-0">
-                  {optimizerResults.error && (
-                    <p className="text-destructive text-xs">{optimizerResults.error}</p>
-                  )}
-                  {!optimizerResults.error && optimizerResults.best && (
-                    <>
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-semibold">{strategyLabel(optimizerResults.best.name, locale)}</p>
-                        <Badge variant="secondary">{formatPct(optimizerResults.best.pSuccess)}</Badge>
-                      </div>
-                      <ul className="list-disc space-y-1 pl-5 text-xs">
-                        <li>{explainWhyWin(optimizerResults.best.name, optimizerResults.best.objective, locale)}</li>
-                        <li>
-                          {tr("results.optimizerResources", {
-                            runs: optimizerResults.best.details?.runs ?? runs,
-                            recycle: Math.round((optimizerResults.best.details?.recycleRate ?? recycleRate) * 100),
-                            crafts: optimizerResults.best.details?.crafts ?? 0,
-                          })}
-                        </li>
-                      </ul>
-                    </>
-                  )}
-                </CardContent>
-              </Card>
-            )}
-
-            {optimizerEnabled && (
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base">{tr("results.optimizerAllStrategies")}</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 pt-0">
-                  {optimizerResults.all.map((result) => (
-                    <div
-                      key={`optimizer-${result.name}`}
-                      className="grid gap-2 rounded-md border px-3 py-2 text-xs md:grid-cols-[1.2fr_0.6fr_1fr]"
-                    >
-                      <div className="space-y-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium">{strategyLabel(result.name, locale)}</span>
-                          {requiresTransmuter(result.name) && (
-                            <Badge variant="outline">{tr("results.optimizerRequiresTransmuter")}</Badge>
-                          )}
-                        </div>
-                        {result.details?.note && (
-                          <p className="text-muted-foreground">{strategyNoteLabel(result.details.note, locale)}</p>
-                        )}
-                      </div>
-                      <div className="font-semibold">{formatPct(result.pSuccess)}</div>
-                      <div className="text-muted-foreground">
-                        {tr("results.optimizerListDetail", {
-                          runs: result.details?.runs ?? runs,
-                          recycle: Math.round((result.details?.recycleRate ?? recycleRate) * 100),
-                          crafts: result.details?.crafts ?? 0,
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            )}
-
-            {optimizerEnabled && (
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base">{tr("results.optimizerRunsNeeded")}</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 pt-0">
-                  {optimizerRunTargets.map((targetRow) => {
-                    const detail = optimizerResults.all.find((row) => row.name === targetRow.name)?.details;
-                    const transmuterOnly = targetRow.name === "Transmuter only (period)";
-                    const combined = targetRow.name === "Combined (Domains+Strongbox + Transmuter)";
-
-                    return (
-                      <div key={`run-target-${targetRow.name}`} className="space-y-2 rounded-md border px-3 py-2">
-                        <div className="flex flex-wrap items-center gap-2 text-xs">
-                          <span className="font-medium text-sm">{strategyLabel(targetRow.name, locale)}</span>
-                          {transmuterOnly && <Badge variant="outline">{tr("results.optimizerFixedByCrafts")}</Badge>}
-                          {combined && <Badge variant="outline">{tr("results.optimizerCraftsFixed")}</Badge>}
-                        </div>
-                        <div className="grid gap-2 text-xs sm:grid-cols-3">
-                          <div>
-                            <p className="text-muted-foreground">{tr("results.metricRuns50")}</p>
-                            <p className="font-semibold">{formatRunsWithResin(targetRow.runs50, tr("inputs.resin"))}</p>
-                          </div>
-                          <div>
-                            <p className="text-muted-foreground">{tr("results.metricRuns90")}</p>
-                            <p className="font-semibold">{formatRunsWithResin(targetRow.runs90, tr("inputs.resin"))}</p>
-                          </div>
-                          <div>
-                            <p className="text-muted-foreground">
-                              {tr("results.optimizerRunsForTarget", { target: formatPct(targetProb) })}
-                            </p>
-                            <p className="font-semibold">
-                              {formatRunsWithResin(targetRow.runsTarget, tr("inputs.resin"))}
-                            </p>
-                          </div>
-                        </div>
-                        {detail?.note && (
-                          <p className="text-muted-foreground text-xs">{strategyNoteLabel(detail.note, locale)}</p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </CardContent>
-              </Card>
-            )}
-            {farmStrategy === "combined" && (
-              <p className="text-muted-foreground text-xs">{tr("results.optimizerCombinedNote")}</p>
-            )}
           </CardContent>
         </Card>
       </div>
+        </TabsContent>
+      </Tabs>
 
       <footer className="rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground sm:text-xs">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
           <span>
             {appName} v{appVersion}
           </span>
-          <span>locale: {locale}</span>
-          <span>theme: {selectedTheme}</span>
+          <span>locale: {debugLocaleValue}</span>
+          <span>theme: {debugThemeValue}</span>
         </div>
       </footer>
     </main>
@@ -1866,8 +3198,30 @@ function localizeSubStat(sub: SubStat, locale: Locale): string {
   return t(locale, SUBSTAT_LABEL_KEYS[sub]);
 }
 
+function localizeEvalStatKey(statKey: StatKey, locale: Locale): string {
+  return t(locale, STAT_KEY_LABEL_KEYS[statKey]);
+}
+
+function localizeMainStatFromEnkaKey(mainKey: string, locale: Locale): string {
+  const mapped = mapEnkaStatToStatKey(mainKey);
+  if (mapped) {
+    return localizeEvalStatKey(mapped, locale);
+  }
+  return mainKey;
+}
+
 function localizeAttemptSource(source: AttemptSource, locale: Locale): string {
   return t(locale, ATTEMPT_SOURCE_LABEL_KEYS[source]);
+}
+
+function priorityBadgeVariant(priority: "high" | "medium" | "low"): "destructive" | "secondary" | "outline" {
+  if (priority === "high") {
+    return "destructive";
+  }
+  if (priority === "medium") {
+    return "secondary";
+  }
+  return "outline";
 }
 
 function isShareTheme(value: unknown): value is ShareTheme {
@@ -1900,12 +3254,31 @@ function inferUpgradePreset(group: SubStat[]): FormValues["upgradePreset"] {
   return "custom";
 }
 
-function resolveMainForSlot(slot: Slot, main: MainStat | undefined): MainStat {
-  const allowed = MAIN_OPTIONS_BY_SLOT[slot];
-  if (main && allowed.includes(main)) {
-    return main;
+function normalizeMainForSlot(slot: Slot, main: MainStat): MainStat {
+  if (slot === Slot.Flower) {
+    return MainStat.FlatHp;
   }
-  return allowed[0];
+  if (slot === Slot.Plume) {
+    return MainStat.FlatAtk;
+  }
+  return main;
+}
+
+function resolveMainForSlot(slot: Slot, main: MainStat | undefined): MainStat {
+  if (!main) {
+    const preferredMain = PREFERRED_MAIN_BY_SLOT[slot];
+    const allowed = MAIN_OPTIONS_BY_SLOT[slot];
+    return allowed.includes(preferredMain) ? preferredMain : allowed[0];
+  }
+
+  const normalizedMain = normalizeMainForSlot(slot, main);
+  const allowed = MAIN_OPTIONS_BY_SLOT[slot];
+  if (allowed.includes(normalizedMain)) {
+    return normalizedMain;
+  }
+
+  const preferredMain = PREFERRED_MAIN_BY_SLOT[slot];
+  return allowed.includes(preferredMain) ? preferredMain : allowed[0];
 }
 
 function uniqueSubStats(subs: SubStat[], excludedSub: SubStat | null, maxLength = SUBSTAT_OPTIONS.length): SubStat[] {
@@ -1927,6 +3300,30 @@ function uniqueSubStats(subs: SubStat[], excludedSub: SubStat | null, maxLength 
   return unique;
 }
 
+function suggestPresetFromCharacter(
+  character: EnkaCharacterSummary | null,
+): "em-reaction-cv-irrelevant" | "crit-dps-cv30" | null {
+  if (!character) {
+    return null;
+  }
+
+  let emSubCount = 0;
+  let critSubCount = 0;
+
+  for (const artifact of character.artifacts) {
+    for (const sub of artifact.subs ?? []) {
+      const key = (sub.key ?? "").toUpperCase();
+      if (key.includes("MASTERY")) {
+        emSubCount += 1;
+      } else if (key.includes("CRITICAL")) {
+        critSubCount += 1;
+      }
+    }
+  }
+
+  return emSubCount > critSubCount ? "em-reaction-cv-irrelevant" : "crit-dps-cv30";
+}
+
 function clampInteger(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
@@ -1945,6 +3342,29 @@ function formatPct(value: number): string {
   return `${(clampNumber(value, 0, 1) * 100).toFixed(2)}%`;
 }
 
+function formatDamageIndexNumber(value: number, locale: Locale): string {
+  return new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(value) ? value : 0);
+}
+
+function formatDamageIndexPercent(value: number, locale: Locale): string {
+  return `${new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(value) ? value : 0)}%`;
+}
+
+function formatDamageIndexMultiplier(value: number, locale: Locale): string {
+  return `${new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 3,
+  }).format(Number.isFinite(value) ? value : 0)}x`;
+}
+
+function parseNumberOrFallback(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function formatRuns(value: number): string {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)).toLocaleString() : "\u221E";
 }
@@ -1955,6 +3375,15 @@ function formatExpectedRuns(value: number): string {
 
 function formatCv(value: number): string {
   return `${value.toFixed(1)}`;
+}
+
+function formatDaysWithResin(days: number, resinPerDay: number): string {
+  if (!Number.isFinite(days)) {
+    return "\u221E";
+  }
+
+  const safeDays = Math.max(0, Math.round(days));
+  return `${formatRuns(safeDays)} (${formatRuns(safeDays * resinPerDay)})`;
 }
 
 function formatRunsWithResin(runs: number, resinLabel: string): string {
