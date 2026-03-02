@@ -1,0 +1,113 @@
+name: Update Game Data Lite
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 0"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-game-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine Node Version
+        id: node-version
+        run: |
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));const raw=pkg.engines&&pkg.engines.node?String(pkg.engines.node):'';const match=raw.match(/\d+/);const version=match?match[0]:'20';fs.appendFileSync(process.env.GITHUB_OUTPUT,`version=${version}\n`);"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Get pnpm Store Path
+        id: pnpm-cache
+        run: echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm Store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Update Game Data
+        run: pnpm update:game-data
+
+      - name: Run Tests
+        run: pnpm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Detect Generated Changes
+        id: changes
+        run: |
+          if git diff --quiet -- src/lib/genshin/game-data/generated/game-data-lite.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Capture Game Data Metadata
+        if: steps.changes.outputs.changed == 'true'
+        id: meta
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = "src/lib/genshin/game-data/generated/game-data-lite.json";
+          const data = JSON.parse(fs.readFileSync(path, "utf8"));
+          const characters = Object.keys(data.characters ?? {}).length;
+          const weapons = Object.keys(data.weapons ?? {}).length;
+          const artifactSets = Object.keys(data.artifactSets ?? {}).length;
+          const output = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(output, `version=${data.version ?? ""}\n`);
+          fs.appendFileSync(output, `generated_at=${data.generatedAt ?? ""}\n`);
+          fs.appendFileSync(output, `characters=${characters}\n`);
+          fs.appendFileSync(output, `weapons=${weapons}\n`);
+          fs.appendFileSync(output, `artifact_sets=${artifactSets}\n`);
+          NODE
+
+      - name: No Changes
+        if: steps.changes.outputs.changed != 'true'
+        run: echo "No changes detected in game-data-lite.json"
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/update-game-data-lite
+          title: chore(game-data): update game-data-lite
+          commit-message: chore(game-data): update game-data-lite
+          add-paths: |
+            src/lib/genshin/game-data/generated/game-data-lite.json
+          body: |
+            Automated update for `game-data-lite.json`.
+
+            - version: `${{ steps.meta.outputs.version }}`
+            - generatedAt: `${{ steps.meta.outputs.generated_at }}`
+            - characters: `${{ steps.meta.outputs.characters }}`
+            - weapons: `${{ steps.meta.outputs.weapons }}`
+            - artifactSets: `${{ steps.meta.outputs.artifact_sets }}`
+
+            Validation run in workflow:
+            - `pnpm update:game-data`
+            - `pnpm test`
+            - `npm run build`
