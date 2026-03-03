@@ -1,0 +1,96 @@
+{
+  "version": "2026-03-03-9e35936",
+  "generatedAt": "2026-03-03T02:39:44.387Z",
+  "sourceCounts": {
+    "enka": 113,
+    "animegamedata": 152,
+    "genshindata": 98
+  },
+  "sourceStatus": {
+    "enka": {
+      "ok": true
+    },
+    "animegamedata": {
+      "ok": true
+    },
+    "genshindata": {
+      "ok": true
+    }
+  },
+  "summary": {
+    "characterCount": 113,
+    "conflictCount": 0,
+    "missingRequiredCount": 1,
+    "missingRequiredRate": 0.00885,
+    "unverifiedNameCount": 0,
+    "characterCurveCoverageRate": 1,
+    "talentCoverageRate": 0.982301,
+    "characterProfileCoverageRate": 1,
+    "hitCatalogCoverageRate": 1,
+    "hitLabelEnCoverageRate": 1,
+    "hitLabelPtBRCoverageRate": 1,
+    "hitLabelExactEnCoverageRate": 0.847254,
+    "hitLabelExactPtBRCoverageRate": 0.847254,
+    "missingCurveOrTalentRate": 0.017699,
+    "curveConflictCount": 2
+  },
+  "thresholds": {
+    "maxConflicts": 100,
+    "maxMissingRequiredRate": 0.05,
+    "maxMissingCurveOrTalentRate": 0.05,
+    "curveCrossCheckEpsilon": 0.000001
+  },
+  "conflicts": [],
+  "missingRequired": [
+    {
+      "id": 10000062,
+      "missing": [
+        "rarity"
+      ]
+    }
+  ],
+  "coverage": {
+    "playableCharacterCount": 113,
+    "characterCurveCount": 113,
+    "talentCount": 113,
+    "weaponCurveCount": 262,
+    "characterProfileCount": 113,
+    "hitCatalogCharacterCount": 113,
+    "charactersWithTalentCount": 113,
+    "charactersWithHitCatalogForTalentCount": 113,
+    "missingCharacterCurveIds": [],
+    "missingTalentIds": [
+      10000005,
+      10000007
+    ],
+    "missingCurveOrTalentIds": [
+      10000005,
+      10000007
+    ],
+    "missingCharacterProfileIds": [],
+    "missingHitCatalogIds": []
+  },
+  "crossCheck": {
+    "epsilon": 0.000001,
+    "checkedCharacterCurveCount": 69,
+    "checkedWeaponCurveCount": 185,
+    "checkedTalentCount": 69,
+    "curveConflicts": [
+      {
+        "kind": "talent",
+        "id": 10000022,
+        "metric": "length",
+        "animeValue": 210,
+        "genshinValue": 200
+      },
+      {
+        "kind": "talent",
+        "id": 10000022,
+        "metric": "checksum",
+        "animeValue": 1265.614478,
+        "genshinValue": 1245.114478,
+        "delta": 20.5
+      }
+    ]
+  }
+}
