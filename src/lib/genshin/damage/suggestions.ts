@@ -1,4 +1,5 @@
 import { buildDamageTable } from "./table";
+import type { BuffState } from "./buffs";
 import type { AttackKind, CharacterState, DamageType, EnemyModel } from "./types";
 
 export type SetupMode = "enka" | "manual";
@@ -24,6 +25,7 @@ export interface DamageSetup {
     dmgBonusByElementPct: Record<DamageType, number>;
   };
   damageTypeOverride?: DamageType | null;
+  selectedElementBonus?: DamageType;
 }
 
 export interface SuggestionDelta {
@@ -56,6 +58,7 @@ interface EvaluateContext {
   sectionFilter: AttackKind[];
   includeCrit: boolean;
   enemy?: EnemyModel;
+  buffStates?: BuffState[];
 }
 
 export interface ComputeSuggestionOptions {
@@ -64,6 +67,7 @@ export interface ComputeSuggestionOptions {
   includeCrit?: boolean;
   includeEmSuggestion?: boolean;
   enemy?: EnemyModel;
+  buffStates?: BuffState[];
   evaluateMetric?: (setup: DamageSetup, context: EvaluateContext) => MetricSnapshot;
 }
 
@@ -121,7 +125,9 @@ function evaluateSetupMetric(
     sectionFilter: context.sectionFilter,
     includeCrit: context.includeCrit,
     damageTypeOverride: setup.damageTypeOverride ?? null,
+    selectedElement: setup.selectedElementBonus ?? setup.damageTypeOverride ?? "pyro",
     enemy: context.enemy,
+    buffStates: context.buffStates,
   });
   let metric = 0;
   const byType: Partial<Record<DamageType, number>> = {};
@@ -257,7 +263,12 @@ export function computeSuggestionRankings(
   const topN = Math.max(1, Math.floor(opts.topN ?? SUGGESTION_LIMIT_DEFAULT));
   const includeEmSuggestion = opts.includeEmSuggestion ?? false;
   const evaluate = opts.evaluateMetric ?? evaluateSetupMetric;
-  const context: EvaluateContext = { sectionFilter, includeCrit, enemy: opts.enemy };
+  const context: EvaluateContext = {
+    sectionFilter,
+    includeCrit,
+    enemy: opts.enemy,
+    buffStates: opts.buffStates,
+  };
   const baseline = evaluate(setup, context);
   const suggestionDeltas = buildSuggestionDeltas(baseline.effectiveDamageType, includeEmSuggestion);
 

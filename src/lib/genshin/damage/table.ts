@@ -2,13 +2,14 @@ import type { EnkaCharacterSummary } from "@/lib/enka/types";
 import { loadGameDataCore } from "@/lib/genshin/game-data-core";
 
 import { computeHitDamage } from "./engine";
+import type { EnemyModel as ExplicitEnemyModel } from "./enemy";
 import { characterStateFromEnka } from "./from-enka";
+import { applyBuffStates, type BuffState } from "./buffs";
 import type {
   AttackKind,
   CharacterState,
   DamageResult,
   DamageType,
-  EnemyModel,
 } from "./types";
 
 export interface DamageRow {
@@ -37,7 +38,9 @@ export interface BuildDamageTableOptions {
   includeCrit?: boolean;
   sectionFilter?: AttackKind[];
   damageTypeOverride?: DamageType | null;
-  enemy?: EnemyModel;
+  selectedElement?: DamageType | null;
+  enemy?: ExplicitEnemyModel;
+  buffStates?: BuffState[];
 }
 
 const SECTION_ORDER: readonly AttackKind[] = ["normal", "skill", "burst"];
@@ -74,9 +77,33 @@ export function buildDamageTable(
   const locale = opts.locale ?? "en";
   const includeCrit = opts.includeCrit !== false;
   const damageTypeOverride = opts.damageTypeOverride ?? null;
+  const selectedElement = opts.selectedElement ?? null;
+  const buffStates = opts.buffStates ?? [];
   const enemy = opts.enemy;
   const requestedSections = new Set<AttackKind>(opts.sectionFilter ?? SECTION_ORDER);
   const notes: string[] = [];
+  const profile = state.profile ?? core.characterProfiles[state.characterId];
+  const primaryScalingStat = profile?.scalingStatByKind.normal ?? "atk";
+  const mainDamageType = damageTypeOverride ?? "physical";
+  const buffResult = applyBuffStates(state.combatTotals, buffStates, {
+    locale,
+    mainDamageType,
+    selectedElement,
+    scalingStat: primaryScalingStat,
+    notes,
+  });
+  const stateWithBuffs: CharacterState = {
+    ...state,
+    combatTotals: buffResult.combatTotals2,
+  };
+  for (const [type, value] of Object.entries(buffResult.enemyDelta.resShredPctPointsByType)) {
+    notes.push(`buff_enemy_res_shred:${type}:${value}`);
+  }
+  for (const applied of buffResult.applied) {
+    notes.push(`buff_applied:${applied.id}`);
+    notes.push(...applied.notes.map((entry) => `buff_note:${applied.id}:${entry}`));
+  }
+
   const sections: DamageTable["sections"] = {
     normal: [],
     skill: [],
@@ -100,16 +127,28 @@ export function buildDamageTable(
     }
 
     for (const entry of catalog[kind]) {
+      const resolvedDamageType = (entry.damageType
+        ?? damageTypeOverride
+        ?? profile?.defaultDamageTypeByKind[kind]
+        ?? "physical") as DamageType;
+      const resShredPctPoints = buffResult.enemyDelta.resShredPctPointsByType[resolvedDamageType] ?? 0;
+      const enemyForHit = enemy
+        ? {
+          ...enemy,
+          damageType: resolvedDamageType,
+        }
+        : undefined;
       const result = computeHitDamage(
-        state,
+        stateWithBuffs,
         {
           kind,
           hitId: entry.id,
-          ...((entry.damageType ?? damageTypeOverride)
-            ? { damageType: (entry.damageType ?? damageTypeOverride) as DamageType }
+          ...((entry.damageType ?? damageTypeOverride ?? profile?.defaultDamageTypeByKind[kind])
+            ? { damageType: resolvedDamageType }
             : {}),
           useCrit: includeCrit,
-          ...(enemy ? { enemy } : {}),
+          ...(enemyForHit ? { enemy: enemyForHit } : {}),
+          resShredPctPoints,
         },
         core,
       );
