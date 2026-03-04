@@ -81,10 +81,52 @@ const dictEn = {
       damageTypeAuto: "Profile default",
       targetAdvanced: "Target (advanced)",
       targetLevel: "Target level",
+      targetBaseRes: "Base RES %",
+      targetApplyTo: "Apply to: Damage type used ({type})",
       targetResistance: "{type} resistance %",
       targetResistanceHint: "Fallback resistance when not set is {value}%.",
       includeCrit: "Include crit expectation",
       showFullColumns: "Show full columns",
+    },
+    buffsPanel: {
+      title: "Buffs & Debuffs",
+      description: "Toggle temporary effects. Parameters only show when enabled.",
+      tabs: {
+        buffs: "Buffs",
+        debuffs: "Debuffs",
+      },
+      empty: "No entries available.",
+    },
+    buffs: {
+      artifactNoblesse4p: "Noblesse Oblige (4pc)",
+      artifactNoblesse4pDesc: "+20% ATK to party.",
+      weaponTtdsR5: "Thrilling Tales (R5)",
+      weaponTtdsR5Desc: "+48% ATK to next character.",
+      bennettBurstFlatAtk: "Bennett Burst",
+      bennettBurstFlatAtkDesc: "Adds flat ATK from Fantastic Voyage.",
+      kazuhaA4Bonus: "Kazuha A4",
+      kazuhaA4BonusDesc: "Elemental DMG Bonus from Kazuha EM.",
+      artifactVv4p: "Viridescent Venerer (4pc)",
+      artifactVv4pDesc: "-40% RES to swirled element.",
+      artifactVv4pHelper: "VV reduces RES of the element Swirled, not Anemo.",
+      customCritRatePct: "Custom Crit Rate",
+      customCritRatePctDesc: "Manual crit rate buff for sanity checks.",
+      unknown: "Unknown buff",
+    },
+    buffParams: {
+      genericValue: "Value",
+      kazuhaA4Bonus: {
+        em: "Kazuha EM",
+      },
+      artifactVv4p: {
+        swirlElement: "Swirled element",
+      },
+      bennettBurstFlatAtk: {
+        flatAtk: "Bennett flat ATK",
+      },
+      customCritRatePct: {
+        valuePct: "Crit Rate (+%)",
+      },
     },
     sections: {
       normal: "Normal Attacks",
@@ -118,6 +160,8 @@ const dictEn = {
       avg: "Avg",
       delta: "Delta",
       damageType: "Type",
+      activeBuffs: "Active buffs",
+      activeDebuffs: "Active debuffs",
     },
   },
   import: {

@@ -11,6 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { EnkaCharacterSummary } from "@/lib/enka/types";
 import { useActiveEnkaCharacter } from "@/lib/enka/use-active-character";
@@ -23,14 +24,17 @@ import {
   type DamageType,
   type EnemyModel,
 } from "@/lib/genshin/damage";
+import { BUFF_LIST, BUFFS, type BuffId, type BuffState, type SwirlElement } from "@/lib/genshin/damage/buffs";
 import { extractCombatTotals } from "@/lib/genshin/eval";
 import { loadGameDataCore } from "@/lib/genshin/game-data-core";
 import { loadGameDataLite, localizeGameDataName, resolveCharacter } from "@/lib/genshin/game-data";
 import { t, type Locale } from "@/lib/i18n";
+import { formatDamage, formatNumber, formatPctPoints, formatStatInt } from "@/lib/ui/format";
 
 type SetupMode = "enka" | "manual";
 type ElementDamageType = Exclude<DamageType, "physical">;
 type SetupKey = "A" | "B";
+type BuffPanelTab = "buff" | "debuff";
 
 interface SetupCombatTotals {
   hp: number;
@@ -56,23 +60,25 @@ interface DamageSetup {
   combatTotals: SetupCombatTotals;
   damageTypeOverride?: DamageType | null;
   selectedElementBonus: ElementDamageType;
+  buffStates: BuffState[];
 }
 
 interface PersistedDamageLabState {
   compareEnabled?: boolean;
   includeCrit?: boolean;
-  showFullColumns?: boolean;
   activeSetup?: SetupKey;
   setupA?: DamageSetup;
   setupB?: DamageSetup;
   enemy?: EnemyModel;
 }
 
-const STORAGE_KEY = "genshin_calc_damage_setups_v1";
+const STORAGE_KEY_V1 = "genshin_calc_damage_setups_v1";
+const STORAGE_KEY_V2 = "genshin_calc_damage_setups_v2";
 const SETUP_A_LABEL = "Setup A";
 const SETUP_B_LABEL = "Setup B";
 const DEFAULT_TARGET_LEVEL = 90;
 const DEFAULT_TARGET_RESISTANCE = 10;
+const MAX_ACTIVE_BUFF_CHIPS = 4;
 
 const DAMAGE_TYPES: readonly DamageType[] = [
   "physical",
@@ -94,6 +100,7 @@ const ELEMENT_TYPES: readonly ElementDamageType[] = [
   "anemo",
   "geo",
 ];
+const SWIRLABLE_ELEMENTS: readonly SwirlElement[] = ["pyro", "hydro", "electro", "cryo"];
 
 const SECTION_ORDER: readonly AttackKind[] = ["normal", "skill", "burst"];
 
@@ -159,24 +166,33 @@ function normalizeElementDamageType(value: unknown): ElementDamageType {
   return "pyro";
 }
 
+function isSwirlElement(value: unknown): value is SwirlElement {
+  return SWIRLABLE_ELEMENTS.includes(value as SwirlElement);
+}
+
 function deserializeEnemyModel(raw: unknown): EnemyModel {
   if (!isRecord(raw)) {
     return createDefaultEnemyModel();
   }
-  const resistanceRaw = isRecord(raw.resistanceByType) ? raw.resistanceByType : {};
-  const resistanceByType: Partial<Record<DamageType, number>> = {};
+
+  // Legacy migration: convert old per-type map to base RES if needed.
+  const legacyResistanceRaw = isRecord(raw.resistanceByType) ? raw.resistanceByType : {};
+  let legacyFallbackRes = DEFAULT_TARGET_RESISTANCE;
   for (const type of DAMAGE_TYPES) {
-    const next = toFiniteNumber(resistanceRaw[type], Number.NaN);
+    const next = toFiniteNumber(legacyResistanceRaw[type], Number.NaN);
     if (Number.isFinite(next)) {
-      resistanceByType[type] = next;
+      legacyFallbackRes = next;
+      break;
     }
   }
+
   const level = Math.floor(clamp(toFiniteNumber(raw.level, DEFAULT_TARGET_LEVEL), 1, 100));
-  const defOverrideRaw = toFiniteNumber(raw.defMultiplierOverride, Number.NaN);
+  const baseResPctPoints = toFiniteNumber(raw.baseResPctPoints, legacyFallbackRes);
+  const damageType = normalizeDamageType(raw.damageType) ?? "physical";
   return {
     level,
-    resistanceByType,
-    defMultiplierOverride: Number.isFinite(defOverrideRaw) ? defOverrideRaw : null,
+    baseResPctPoints,
+    damageType,
   };
 }
 
@@ -210,9 +226,96 @@ function createDefaultCombatTotals(): SetupCombatTotals {
 function createDefaultEnemyModel(): EnemyModel {
   return {
     level: DEFAULT_TARGET_LEVEL,
-    resistanceByType: {},
-    defMultiplierOverride: null,
+    baseResPctPoints: DEFAULT_TARGET_RESISTANCE,
+    damageType: "physical",
   };
+}
+
+function cloneBuffStates(buffStates: BuffState[]): BuffState[] {
+  return buffStates.map((state) => ({
+    id: state.id,
+    enabled: state.enabled === true,
+    ...(state.params ? { params: { ...state.params } } : {}),
+  }));
+}
+
+function normalizeBuffParams(
+  buffId: BuffId,
+  rawParams: unknown,
+  selectedElement?: DamageType | null,
+): Record<string, number | string | boolean> | undefined {
+  const meta = BUFFS[buffId];
+  const requiredParams = meta.requiredParams ?? [];
+  if (requiredParams.length === 0) {
+    return undefined;
+  }
+
+  const source = isRecord(rawParams) ? rawParams : {};
+  const normalized: Record<string, number | string | boolean> = {};
+  for (const key of requiredParams) {
+    if (buffId === "artifact_vv_4p" && key === "swirlElement") {
+      const fallbackSwirl = isSwirlElement(selectedElement)
+        ? selectedElement
+        : (isSwirlElement(meta.defaults?.swirlElement) ? meta.defaults?.swirlElement : "pyro");
+      const rawValue = source[key];
+      normalized[key] = isSwirlElement(rawValue) ? rawValue : fallbackSwirl;
+      continue;
+    }
+
+    const fallback = meta.defaults?.[key];
+    const numericFallback = typeof fallback === "number" ? fallback : 0;
+    normalized[key] = toFiniteNumber(source[key], numericFallback);
+  }
+  return normalized;
+}
+
+function createDefaultBuffStates(): BuffState[] {
+  return BUFF_LIST.map((meta) => {
+    return {
+      id: meta.id,
+      enabled: false,
+    };
+  });
+}
+
+function normalizeBuffStates(raw: unknown): BuffState[] {
+  const rawList = Array.isArray(raw) ? raw : [];
+  const parsedById = new Map<BuffId, BuffState>();
+
+  for (const entry of rawList) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const idRaw = entry.id;
+    if (typeof idRaw !== "string" || !(idRaw in BUFFS)) {
+      continue;
+    }
+    const id = idRaw as BuffId;
+    const params = normalizeBuffParams(id, entry.params);
+    parsedById.set(id, {
+      id,
+      enabled: entry.enabled === true,
+      ...(params ? { params } : {}),
+    });
+  }
+
+  return BUFF_LIST.map((meta) => {
+    const parsed = parsedById.get(meta.id);
+    const enabled = parsed?.enabled === true;
+    if (!enabled) {
+      return {
+        id: meta.id,
+        enabled: false,
+        ...(parsed?.params ? { params: { ...parsed.params } } : {}),
+      };
+    }
+    const params = normalizeBuffParams(meta.id, parsed?.params);
+    return {
+      id: meta.id,
+      enabled: true,
+      ...(params ? { params } : {}),
+    };
+  });
 }
 
 function createManualSetup(label: string): DamageSetup {
@@ -228,6 +331,7 @@ function createManualSetup(label: string): DamageSetup {
     combatTotals: createDefaultCombatTotals(),
     damageTypeOverride: null,
     selectedElementBonus: "pyro",
+    buffStates: createDefaultBuffStates(),
   };
 }
 
@@ -240,6 +344,7 @@ function cloneSetup(base: DamageSetup, label: string): DamageSetup {
       ...base.combatTotals,
       dmgBonusByElementPct: { ...base.combatTotals.dmgBonusByElementPct },
     },
+    buffStates: cloneBuffStates(base.buffStates),
   };
 }
 
@@ -248,6 +353,30 @@ function localizeDamageType(
   tr: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   return tr(`damageLab.damageTypes.${type}`);
+}
+
+function getBuffParamLabelKey(buffId: BuffId, paramKey: string): string {
+  if (buffId === "kazuha_a4_bonus" && paramKey === "em") {
+    return "damageLab.buffParams.kazuhaA4Bonus.em";
+  }
+  if (buffId === "artifact_vv_4p" && paramKey === "swirlElement") {
+    return "damageLab.buffParams.artifactVv4p.swirlElement";
+  }
+  if (buffId === "bennett_burst_flat_atk" && paramKey === "flatAtk") {
+    return "damageLab.buffParams.bennettBurstFlatAtk.flatAtk";
+  }
+  if (buffId === "custom_crit_rate_pct" && paramKey === "valuePct") {
+    return "damageLab.buffParams.customCritRatePct.valuePct";
+  }
+  return "damageLab.buffParams.genericValue";
+}
+
+function getVisibleChipLabels(labels: string[]): { visible: string[]; hidden: number } {
+  const visible = labels.slice(0, MAX_ACTIVE_BUFF_CHIPS);
+  return {
+    visible,
+    hidden: Math.max(0, labels.length - visible.length),
+  };
 }
 
 function normalizeCharacterElementToDamageType(value: unknown): ElementDamageType {
@@ -297,6 +426,7 @@ function buildSetupFromEnka(
     },
     damageTypeOverride: null,
     selectedElementBonus,
+    buffStates: createDefaultBuffStates(),
   };
 }
 
@@ -325,6 +455,7 @@ function setupSignature(setup: DamageSetup): string {
     combatTotals: setup.combatTotals,
     damageTypeOverride: setup.damageTypeOverride ?? null,
     selectedElementBonus: setup.selectedElementBonus,
+    buffStates: setup.buffStates,
   });
 }
 
@@ -378,13 +509,8 @@ function deserializeSetup(raw: unknown, fallbackLabel: string): DamageSetup | nu
     },
     damageTypeOverride: normalizeDamageType(raw.damageTypeOverride),
     selectedElementBonus: normalizeElementDamageType(raw.selectedElementBonus),
+    buffStates: normalizeBuffStates(raw.buffStates),
   };
-}
-
-function formatNumber(value: number, locale: Locale, maxFractionDigits = 2): string {
-  return new Intl.NumberFormat(locale, {
-    maximumFractionDigits: maxFractionDigits,
-  }).format(Number.isFinite(value) ? value : 0);
 }
 
 function CharacterElementDot({ element }: { element: string | undefined }) {
@@ -410,8 +536,8 @@ export function DamageLab() {
   const [setupB, setSetupB] = useState<DamageSetup>(() => createManualSetup(SETUP_B_LABEL));
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [includeCrit, setIncludeCrit] = useState(true);
-  const [showFullColumns, setShowFullColumns] = useState(false);
   const [activeSetupKey, setActiveSetupKey] = useState<SetupKey>("A");
+  const [buffPanelTab, setBuffPanelTab] = useState<BuffPanelTab>("buff");
   const [enemy, setEnemy] = useState<EnemyModel>(() => createDefaultEnemyModel());
   const [hydrated, setHydrated] = useState(false);
 
@@ -445,12 +571,25 @@ export function DamageLab() {
       return;
     }
 
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const rawV2 = window.localStorage.getItem(STORAGE_KEY_V2);
+    const rawV1 = window.localStorage.getItem(STORAGE_KEY_V1);
+    const raw = rawV2 ?? rawV1;
+    const migratedFromV1 = !rawV2 && Boolean(rawV1);
     if (raw) {
       try {
         const parsed = JSON.parse(raw) as PersistedDamageLabState;
-        const nextA = deserializeSetup(parsed.setupA, SETUP_A_LABEL);
-        const nextB = deserializeSetup(parsed.setupB, SETUP_B_LABEL);
+        const nextA = deserializeSetup(
+          migratedFromV1 && isRecord(parsed.setupA)
+            ? { ...parsed.setupA, buffStates: [] }
+            : parsed.setupA,
+          SETUP_A_LABEL,
+        );
+        const nextB = deserializeSetup(
+          migratedFromV1 && isRecord(parsed.setupB)
+            ? { ...parsed.setupB, buffStates: [] }
+            : parsed.setupB,
+          SETUP_B_LABEL,
+        );
         if (nextA) {
           setSetupA(nextA);
         }
@@ -462,9 +601,6 @@ export function DamageLab() {
         }
         if (typeof parsed.includeCrit === "boolean") {
           setIncludeCrit(parsed.includeCrit);
-        }
-        if (typeof parsed.showFullColumns === "boolean") {
-          setShowFullColumns(parsed.showFullColumns);
         }
         if (parsed.activeSetup === "A" || parsed.activeSetup === "B") {
           setActiveSetupKey(parsed.activeSetup);
@@ -486,13 +622,12 @@ export function DamageLab() {
     const payload: PersistedDamageLabState = {
       compareEnabled,
       includeCrit,
-      showFullColumns,
       activeSetup: activeSetupKey,
       setupA,
       setupB,
       enemy,
     };
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    window.localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload));
   }, [
     activeSetupKey,
     compareEnabled,
@@ -501,7 +636,6 @@ export function DamageLab() {
     includeCrit,
     setupA,
     setupB,
-    showFullColumns,
   ]);
 
   useEffect(() => {
@@ -522,17 +656,25 @@ export function DamageLab() {
       if (!shouldAutoFill) {
         return previous;
       }
-      if (setupSignature(previous) === setupSignature(importedA)) {
+      const importedWithBuffs: DamageSetup = {
+        ...importedA,
+        buffStates: cloneBuffStates(previous.buffStates),
+      };
+      if (setupSignature(previous) === setupSignature(importedWithBuffs)) {
         return previous;
       }
-      return importedA;
+      return importedWithBuffs;
     });
 
     setSetupB((previous) => {
       if (previous.mode !== "enka") {
         return previous;
       }
-      const importedB = { ...importedA, label: SETUP_B_LABEL };
+      const importedB: DamageSetup = {
+        ...importedA,
+        label: SETUP_B_LABEL,
+        buffStates: cloneBuffStates(previous.buffStates),
+      };
       if (setupSignature(previous) === setupSignature(importedB)) {
         return previous;
       }
@@ -555,8 +697,12 @@ export function DamageLab() {
 
   const activeSetup = activeSetupKey === "A" ? setupA : setupB;
   const effectiveDamageTypeForEnemy = resolveEffectiveDamageTypeForEnemyInput(activeSetup);
-  const effectiveResistancePct =
-    enemy.resistanceByType?.[effectiveDamageTypeForEnemy] ?? DEFAULT_TARGET_RESISTANCE;
+  const effectiveResistancePct = enemy.baseResPctPoints;
+  const enemyForSetup = (setup: DamageSetup): EnemyModel => ({
+    level: enemy.level,
+    baseResPctPoints: enemy.baseResPctPoints,
+    damageType: resolveEffectiveDamageTypeForEnemyInput(setup),
+  });
   const updateActiveSetup = (updater: (current: DamageSetup) => DamageSetup) => {
     if (activeSetupKey === "A") {
       setSetupA((current) => updater(current));
@@ -564,6 +710,91 @@ export function DamageLab() {
     }
     setSetupB((current) => updater(current));
   };
+
+  const setActiveBuffEnabled = (buffId: BuffId, enabled: boolean) => {
+    updateActiveSetup((current) => {
+      const nextBuffStates = cloneBuffStates(current.buffStates);
+      const index = nextBuffStates.findIndex((entry) => entry.id === buffId);
+      const params = normalizeBuffParams(
+        buffId,
+        index >= 0 ? nextBuffStates[index]?.params : undefined,
+        current.selectedElementBonus,
+      );
+      const nextState: BuffState = {
+        id: buffId,
+        enabled,
+        ...(params ? { params } : {}),
+      };
+      if (index >= 0) {
+        nextBuffStates[index] = nextState;
+      } else {
+        nextBuffStates.push(nextState);
+      }
+      return {
+        ...current,
+        buffStates: normalizeBuffStates(nextBuffStates),
+      };
+    });
+  };
+
+  const setActiveBuffParam = (
+    buffId: BuffId,
+    paramKey: string,
+    value: number | string | boolean,
+  ) => {
+    updateActiveSetup((current) => {
+      const nextBuffStates = cloneBuffStates(current.buffStates);
+      const index = nextBuffStates.findIndex((entry) => entry.id === buffId);
+      const baseParams = normalizeBuffParams(
+        buffId,
+        index >= 0 ? nextBuffStates[index]?.params : undefined,
+        current.selectedElementBonus,
+      ) ?? {};
+      const nextState: BuffState = {
+        id: buffId,
+        enabled: index >= 0 ? nextBuffStates[index].enabled : true,
+        params: {
+          ...baseParams,
+          [paramKey]: value,
+        },
+      };
+      if (index >= 0) {
+        nextBuffStates[index] = nextState;
+      } else {
+        nextBuffStates.push(nextState);
+      }
+      return {
+        ...current,
+        buffStates: normalizeBuffStates(nextBuffStates),
+      };
+    });
+  };
+
+  const setupBuffEntries = useMemo(() => {
+    return BUFF_LIST.filter((entry) => entry.category === buffPanelTab);
+  }, [buffPanelTab]);
+
+  const activeBuffChips = useMemo(() => {
+    const byId = new Map(activeSetup.buffStates.map((state) => [state.id, state]));
+    const buffLabels: string[] = [];
+    const debuffLabels: string[] = [];
+    for (const meta of BUFF_LIST) {
+      const state = byId.get(meta.id);
+      if (!state?.enabled) {
+        continue;
+      }
+      const label = t(locale, meta.labelKey);
+      if (meta.category === "debuff") {
+        debuffLabels.push(label);
+      } else {
+        buffLabels.push(label);
+      }
+    }
+    return {
+      buffs: getVisibleChipLabels(buffLabels),
+      debuffs: getVisibleChipLabels(debuffLabels),
+    };
+  }, [activeSetup.buffStates, locale]);
 
   const setActiveSetupMode = (mode: SetupMode) => {
     if (mode === "enka" && activeEnka.selectedCharacter) {
@@ -577,7 +808,11 @@ export function DamageLab() {
         selectedElementBonus,
       );
       if (imported) {
-        updateActiveSetup(() => imported);
+        const importedWithBuffs: DamageSetup = {
+          ...imported,
+          buffStates: cloneBuffStates(activeSetup.buffStates),
+        };
+        updateActiveSetup(() => importedWithBuffs);
         return;
       }
     }
@@ -592,7 +827,9 @@ export function DamageLab() {
       locale,
       includeCrit,
       damageTypeOverride: setupA.damageTypeOverride ?? null,
-      enemy,
+      selectedElement: setupA.selectedElementBonus,
+      enemy: enemyForSetup(setupA),
+      buffStates: setupA.buffStates,
     });
   }, [enemy, includeCrit, locale, setupA]);
 
@@ -604,7 +841,9 @@ export function DamageLab() {
       locale,
       includeCrit,
       damageTypeOverride: setupB.damageTypeOverride ?? null,
-      enemy,
+      selectedElement: setupB.selectedElementBonus,
+      enemy: enemyForSetup(setupB),
+      buffStates: setupB.buffStates,
     });
   }, [compareEnabled, enemy, includeCrit, locale, setupB]);
 
@@ -615,7 +854,8 @@ export function DamageLab() {
     return computeSuggestionRankings(setupA, {
       includeCrit,
       topN: 5,
-      enemy,
+      enemy: enemyForSetup(setupA),
+      buffStates: setupA.buffStates,
     });
   }, [enemy, includeCrit, setupA]);
 
@@ -627,7 +867,7 @@ export function DamageLab() {
   }, [activeSetup.characterId, characterOptions]);
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 p-4 md:p-8">
+    <main className="flex min-h-screen w-full flex-col gap-4 px-8 py-8">
       <header className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
@@ -648,8 +888,9 @@ export function DamageLab() {
         </div>
       </header>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,0.85fr)_minmax(0,1.65fr)]">
-        <Card className="h-fit">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[340px_380px_minmax(0,1fr)]">
+        <div className="min-w-0">
+          <Card className="h-fit min-w-0">
           <CardHeader className="space-y-1 pb-3">
             <CardTitle className="font-title">{tr("damageLab.totals.title")}</CardTitle>
             <CardDescription>
@@ -701,6 +942,7 @@ export function DamageLab() {
               label={tr("damageLab.totals.cr")}
               value={activeSetup.combatTotals.critRatePct}
               locale={locale}
+              formatReadOnlyValue={formatPctPoints}
               readOnly={activeSetup.mode === "enka"}
               onChange={(next) => updateActiveSetup((current) => ({
                 ...current,
@@ -711,6 +953,7 @@ export function DamageLab() {
               label={tr("damageLab.totals.cd")}
               value={activeSetup.combatTotals.critDmgPct}
               locale={locale}
+              formatReadOnlyValue={formatPctPoints}
               readOnly={activeSetup.mode === "enka"}
               onChange={(next) => updateActiveSetup((current) => ({
                 ...current,
@@ -721,6 +964,7 @@ export function DamageLab() {
               label={tr("damageLab.totals.er")}
               value={activeSetup.combatTotals.erPct}
               locale={locale}
+              formatReadOnlyValue={formatPctPoints}
               readOnly={activeSetup.mode === "enka"}
               onChange={(next) => updateActiveSetup((current) => ({
                 ...current,
@@ -731,6 +975,7 @@ export function DamageLab() {
               label={tr("damageLab.totals.physicalBonus")}
               value={activeSetup.combatTotals.dmgBonusPhysicalPct}
               locale={locale}
+              formatReadOnlyValue={formatPctPoints}
               readOnly={activeSetup.mode === "enka"}
               onChange={(next) => updateActiveSetup((current) => ({
                 ...current,
@@ -762,6 +1007,7 @@ export function DamageLab() {
                 label={localizeDamageType(activeSetup.selectedElementBonus, tr)}
                 value={activeSetup.combatTotals.dmgBonusByElementPct[activeSetup.selectedElementBonus]}
                 locale={locale}
+                formatReadOnlyValue={formatPctPoints}
                 readOnly={activeSetup.mode === "enka"}
                 onChange={(next) => updateActiveSetup((current) => ({
                   ...current,
@@ -786,6 +1032,7 @@ export function DamageLab() {
                     label={localizeDamageType(type, tr)}
                     value={activeSetup.combatTotals.dmgBonusByElementPct[type]}
                     locale={locale}
+                    formatReadOnlyValue={formatPctPoints}
                     readOnly={activeSetup.mode === "enka"}
                     onChange={(next) => updateActiveSetup((current) => ({
                       ...current,
@@ -802,9 +1049,11 @@ export function DamageLab() {
               </div>
             </details>
           </CardContent>
-        </Card>
+          </Card>
+        </div>
 
-        <Card className="h-fit">
+        <div className="min-w-0">
+          <Card className="h-fit min-w-0">
           <CardHeader className="space-y-1 pb-3">
             <CardTitle className="font-title">{tr("damageLab.setup.title")}</CardTitle>
             <CardDescription>{tr("damageLab.setup.description")}</CardDescription>
@@ -983,6 +1232,102 @@ export function DamageLab() {
               </Select>
             </div>
 
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">{tr("damageLab.buffsPanel.title")}</p>
+                <p className="text-muted-foreground text-xs">{tr("damageLab.buffsPanel.description")}</p>
+              </div>
+
+              <Tabs value={buffPanelTab} onValueChange={(value) => setBuffPanelTab(value as BuffPanelTab)}>
+                <TabsList className="w-full">
+                  <TabsTrigger value="buff">{tr("damageLab.buffsPanel.tabs.buffs")}</TabsTrigger>
+                  <TabsTrigger value="debuff">{tr("damageLab.buffsPanel.tabs.debuffs")}</TabsTrigger>
+                </TabsList>
+              </Tabs>
+
+              <div className="space-y-2">
+                {setupBuffEntries.map((meta) => {
+                  const state = activeSetup.buffStates.find((entry) => entry.id === meta.id);
+                  const isEnabled = state?.enabled === true;
+                  const requiredParams = meta.requiredParams ?? [];
+
+                  return (
+                    <div key={`buff-entry-${meta.id}`} className="space-y-2 rounded-md border p-2.5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium" title={tr(meta.labelKey)}>
+                            {tr(meta.labelKey)}
+                          </p>
+                          <p className="text-muted-foreground text-xs">{tr(meta.descriptionKey)}</p>
+                        </div>
+                        <Switch
+                          checked={isEnabled}
+                          onCheckedChange={(checked) => setActiveBuffEnabled(meta.id, checked)}
+                          aria-label={tr(meta.labelKey)}
+                        />
+                      </div>
+
+                      {isEnabled && requiredParams.length > 0 && (
+                        <div className="grid gap-2">
+                          {requiredParams.map((paramKey) => {
+                            const normalizedParams = normalizeBuffParams(
+                              meta.id,
+                              state?.params,
+                              activeSetup.selectedElementBonus,
+                            );
+                            const rawValue = normalizedParams?.[paramKey];
+                            if (meta.id === "artifact_vv_4p" && paramKey === "swirlElement") {
+                              const swirlElement = isSwirlElement(rawValue) ? rawValue : "pyro";
+                              return (
+                                <div key={`buff-param-${meta.id}-${paramKey}`} className="space-y-1">
+                                  <label className="text-muted-foreground text-xs font-medium">
+                                    {tr(getBuffParamLabelKey(meta.id, paramKey))}
+                                  </label>
+                                  <Select
+                                    value={swirlElement}
+                                    onValueChange={(value) => setActiveBuffParam(meta.id, paramKey, value)}
+                                  >
+                                    <SelectTrigger className="w-full">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {SWIRLABLE_ELEMENTS.map((element) => (
+                                        <SelectItem key={`vv-swirl-${element}`} value={element}>
+                                          {localizeDamageType(element, tr)}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              );
+                            }
+
+                            const value = toFiniteNumber(rawValue, 0);
+                            return (
+                              <LabeledNumberInput
+                                key={`buff-param-${meta.id}-${paramKey}`}
+                                label={tr(getBuffParamLabelKey(meta.id, paramKey))}
+                                value={value}
+                                onChange={(next) => setActiveBuffParam(meta.id, paramKey, next)}
+                              />
+                            );
+                          })}
+                          {meta.id === "artifact_vv_4p" && (
+                            <p className="text-muted-foreground text-xs">
+                              {tr("damageLab.buffs.artifactVv4pHelper")}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {setupBuffEntries.length === 0 && (
+                  <p className="text-muted-foreground text-xs">{tr("damageLab.buffsPanel.empty")}</p>
+                )}
+              </div>
+            </div>
+
             <details className="rounded-md border p-3">
               <summary className="cursor-pointer text-sm font-medium">{tr("damageLab.setup.targetAdvanced")}</summary>
               <div className="mt-3 space-y-2">
@@ -997,18 +1342,18 @@ export function DamageLab() {
                   }))}
                 />
                 <LabeledNumberInput
-                  label={tr("damageLab.setup.targetResistance", {
-                    type: localizeDamageType(effectiveDamageTypeForEnemy, tr),
-                  })}
+                  label={tr("damageLab.setup.targetBaseRes")}
                   value={effectiveResistancePct}
                   onChange={(next) => setEnemy((current) => ({
                     ...current,
-                    resistanceByType: {
-                      ...(current.resistanceByType ?? {}),
-                      [effectiveDamageTypeForEnemy]: next,
-                    },
+                    baseResPctPoints: next,
                   }))}
                 />
+                <p className="text-muted-foreground text-xs">
+                  {tr("damageLab.setup.targetApplyTo", {
+                    type: localizeDamageType(effectiveDamageTypeForEnemy, tr),
+                  })}
+                </p>
                 <p className="text-muted-foreground text-xs">
                   {tr("damageLab.setup.targetResistanceHint", {
                     value: DEFAULT_TARGET_RESISTANCE,
@@ -1022,20 +1367,56 @@ export function DamageLab() {
                 <Checkbox checked={includeCrit} onCheckedChange={(checked) => setIncludeCrit(checked === true)} />
                 <span>{tr("damageLab.setup.includeCrit")}</span>
               </label>
-              <label className="flex items-center gap-2 text-sm lg:hidden">
-                <Checkbox checked={showFullColumns} onCheckedChange={(checked) => setShowFullColumns(checked === true)} />
-                <span>{tr("damageLab.setup.showFullColumns")}</span>
-              </label>
             </div>
           </CardContent>
-        </Card>
+          </Card>
+        </div>
 
-        <Card className="h-fit">
+        <div className="min-w-0">
+          <Card className="h-fit min-w-0">
           <CardHeader className="space-y-1 pb-3">
             <CardTitle className="font-title">{tr("damageLab.results.title")}</CardTitle>
             <CardDescription>{tr("damageLab.results.description")}</CardDescription>
+            {(activeBuffChips.buffs.visible.length > 0 || activeBuffChips.debuffs.visible.length > 0) && (
+              <div className="space-y-1.5 pt-1">
+                {activeBuffChips.buffs.visible.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className="text-muted-foreground text-[11px] font-medium">
+                      {tr("damageLab.results.activeBuffs")}
+                    </span>
+                    {activeBuffChips.buffs.visible.map((label, index) => (
+                      <Badge key={`active-buff-${index}-${label}`} variant="secondary" className="text-[11px]">
+                        {label}
+                      </Badge>
+                    ))}
+                    {activeBuffChips.buffs.hidden > 0 && (
+                      <Badge variant="secondary" className="text-[11px]">
+                        +{activeBuffChips.buffs.hidden}
+                      </Badge>
+                    )}
+                  </div>
+                )}
+                {activeBuffChips.debuffs.visible.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className="text-muted-foreground text-[11px] font-medium">
+                      {tr("damageLab.results.activeDebuffs")}
+                    </span>
+                    {activeBuffChips.debuffs.visible.map((label, index) => (
+                      <Badge key={`active-debuff-${index}-${label}`} variant="outline" className="text-[11px]">
+                        {label}
+                      </Badge>
+                    ))}
+                    {activeBuffChips.debuffs.hidden > 0 && (
+                      <Badge variant="outline" className="text-[11px]">
+                        +{activeBuffChips.debuffs.hidden}
+                      </Badge>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </CardHeader>
-          <CardContent className="space-y-3 pt-0">
+          <CardContent className="min-w-0 space-y-3 pt-0">
             <div className="space-y-2 rounded-md border p-3">
               <p className="font-title text-sm font-medium">{tr("damageLab.suggestions.title")}</p>
               <p className="text-muted-foreground text-xs">{tr("damageLab.suggestions.analyzingSetupA")}</p>
@@ -1049,12 +1430,12 @@ export function DamageLab() {
                       <p className="font-medium">
                         {tr("damageLab.suggestions.impact", {
                           label: tr(`damageLab.suggestions.items.${item.suggestionId}`),
-                          deltaPct: formatNumber(item.deltaPct, locale, 2),
+                          deltaPct: formatNumber(item.deltaPct, locale, 1),
                         })}
                       </p>
                       <p className="text-muted-foreground text-xs">
                         {tr("damageLab.suggestions.deltaAbs", {
-                          value: formatNumber(item.deltaAbs, locale, 2),
+                          value: formatDamage(item.deltaAbs, locale),
                         })}
                       </p>
                     </li>
@@ -1080,7 +1461,6 @@ export function DamageLab() {
                   rowsA={rowsA}
                   rowsB={compareEnabled ? rowsB : undefined}
                   locale={locale}
-                  showFullColumnsMobile={showFullColumns}
                   labels={{
                     hit: tr("damageLab.results.hit"),
                     nonCrit: tr("damageLab.results.nonCrit"),
@@ -1095,7 +1475,8 @@ export function DamageLab() {
               );
             })}
           </CardContent>
-        </Card>
+          </Card>
+        </div>
       </div>
     </main>
   );
@@ -1132,12 +1513,14 @@ function StatInputRow({
   label,
   value,
   locale,
+  formatReadOnlyValue = formatStatInt,
   readOnly,
   onChange,
 }: {
   label: string;
   value: number;
   locale: Locale;
+  formatReadOnlyValue?: (value: number, locale?: Locale) => string;
   readOnly: boolean;
   onChange: (next: number) => void;
 }) {
@@ -1145,7 +1528,7 @@ function StatInputRow({
     <div className="grid grid-cols-[minmax(0,1fr)_130px] items-center gap-2 rounded-md border p-2.5">
       <label className="text-muted-foreground text-xs">{label}</label>
       {readOnly ? (
-        <p className="text-right text-sm font-medium">{formatNumber(value, locale, 2)}</p>
+        <p className="text-right text-sm font-medium">{formatReadOnlyValue(value, locale)}</p>
       ) : (
         <Input
           type="number"

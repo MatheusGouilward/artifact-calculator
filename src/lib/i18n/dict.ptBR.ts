@@ -83,10 +83,52 @@ const dictPtBR: typeof dictEn = {
       damageTypeAuto: "Padrao do perfil",
       targetAdvanced: "Alvo (avancado)",
       targetLevel: "Nivel do alvo",
+      targetBaseRes: "RES base %",
+      targetApplyTo: "Aplicar em: Tipo de dano usado ({type})",
       targetResistance: "Resistencia {type} %",
       targetResistanceHint: "A resistencia padrao quando nao definida e {value}%.",
       includeCrit: "Incluir expectativa de critico",
       showFullColumns: "Mostrar colunas completas",
+    },
+    buffsPanel: {
+      title: "Buffs e Debuffs",
+      description: "Ative efeitos temporarios. Parametros aparecem so quando ativos.",
+      tabs: {
+        buffs: "Buffs",
+        debuffs: "Debuffs",
+      },
+      empty: "Nenhum item disponivel.",
+    },
+    buffs: {
+      artifactNoblesse4p: "Noblesse Oblige (4p)",
+      artifactNoblesse4pDesc: "+20% de ATQ para o time.",
+      weaponTtdsR5: "Thrilling Tales (R5)",
+      weaponTtdsR5Desc: "+48% de ATQ para o proximo personagem.",
+      bennettBurstFlatAtk: "Supremo do Bennett",
+      bennettBurstFlatAtkDesc: "Adiciona ATQ plano da ult Fantastic Voyage.",
+      kazuhaA4Bonus: "Kazuha A4",
+      kazuhaA4BonusDesc: "Bonus de Dano Elemental baseado na PE do Kazuha.",
+      artifactVv4p: "Sombra Verde (4p)",
+      artifactVv4pDesc: "-40% de RES do elemento dispersado.",
+      artifactVv4pHelper: "A Sombra Verde reduz a RES do elemento dispersado, nao do Anemo.",
+      customCritRatePct: "Taxa Critica custom",
+      customCritRatePctDesc: "Buff manual de taxa critica para testes de sanidade.",
+      unknown: "Buff desconhecido",
+    },
+    buffParams: {
+      genericValue: "Valor",
+      kazuhaA4Bonus: {
+        em: "PE do Kazuha",
+      },
+      artifactVv4p: {
+        swirlElement: "Elemento dispersado",
+      },
+      bennettBurstFlatAtk: {
+        flatAtk: "ATQ plano do Bennett",
+      },
+      customCritRatePct: {
+        valuePct: "Taxa critica (+%)",
+      },
     },
     sections: {
       normal: "Ataques Normais",
@@ -120,6 +162,8 @@ const dictPtBR: typeof dictEn = {
       avg: "Media",
       delta: "Delta",
       damageType: "Tipo",
+      activeBuffs: "Buffs ativos",
+      activeDebuffs: "Debuffs ativos",
     },
   },
   import: {
