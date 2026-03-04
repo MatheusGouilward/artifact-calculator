@@ -1,6 +1,7 @@
 import { loadGameDataCore } from "@/lib/genshin/game-data-core";
 import type { GameDataCore } from "@/lib/genshin/game-data-core";
 
+import { applyEnemyRes, type EnemyModel } from "./enemy";
 import { getTalentMultiplier, getTalentMultiplierByHitId } from "./multipliers";
 import type {
   AttackKind,
@@ -9,7 +10,6 @@ import type {
   CharacterState,
   DamageResult,
   DamageType,
-  EnemyModel,
   ScalingStat,
 } from "./types";
 
@@ -24,34 +24,43 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function resolveEnemy(specEnemy: EnemyModel | undefined, notes: string[]): EnemyModel {
+function normalizePctPointsToRatio(
+  valuePct: number,
+  label: string,
+  notes: string[],
+): { pctPoints: number; ratio: number } {
+  if (!Number.isFinite(valuePct)) {
+    notes.push(`normalized_${label}_pct_non_finite_to_zero`);
+    return { pctPoints: 0, ratio: 0 };
+  }
+  return { pctPoints: valuePct, ratio: valuePct / 100 };
+}
+
+function resolveEnemy(
+  specEnemy: EnemyModel | undefined,
+  effectiveDamageType: DamageType,
+  notes: string[],
+): EnemyModel {
   if (!specEnemy) {
     notes.push("enemy_default_used");
     return {
       level: DEFAULT_ENEMY_LEVEL,
-      resistanceByType: {},
-      defMultiplierOverride: null,
+      baseResPctPoints: DEFAULT_RESISTANCE_PCT,
+      damageType: effectiveDamageType,
     };
+  }
+
+  if (specEnemy.damageType !== effectiveDamageType) {
+    notes.push(`enemy_damage_type_aligned:${specEnemy.damageType}->${effectiveDamageType}`);
   }
 
   return {
     level: Math.floor(clamp(specEnemy.level, 1, 100)),
-    resistanceByType: specEnemy.resistanceByType ?? {},
-    defMultiplierOverride:
-      typeof specEnemy.defMultiplierOverride === "number" && Number.isFinite(specEnemy.defMultiplierOverride)
-        ? specEnemy.defMultiplierOverride
-        : null,
+    baseResPctPoints: Number.isFinite(specEnemy.baseResPctPoints)
+      ? specEnemy.baseResPctPoints
+      : DEFAULT_RESISTANCE_PCT,
+    damageType: effectiveDamageType,
   };
-}
-
-function resolveResistanceMultiplier(resPct: number): number {
-  if (resPct < 0) {
-    return 1 - resPct / 200;
-  }
-  if (resPct <= 75) {
-    return 1 - resPct / 100;
-  }
-  return 1 / (4 * (resPct / 100) + 1);
 }
 
 function getTalentLevelForKind(
@@ -165,47 +174,61 @@ export function computeHitDamage(
   const baseStat = Number.isFinite(baseStatRaw) ? baseStatRaw : 0;
   const multiplier = lookup.multiplier;
   const base = baseStat * multiplier;
-  const dmgBonusPct = damageTypeUsed === "physical"
+  const rawDmgBonusPct = damageTypeUsed === "physical"
     ? state.combatTotals.dmgBonusPhysicalPct
     : state.combatTotals.dmgBonusByElementPct[damageTypeUsed] ?? 0;
+  const dmgBonus = normalizePctPointsToRatio(rawDmgBonusPct, "dmg_bonus", notes);
 
   const attackerLevel = Math.floor(clamp(state.level ?? DEFAULT_ATTACKER_LEVEL, 1, 100));
-  const enemy = resolveEnemy(spec.enemy, notes);
+  const enemy = resolveEnemy(spec.enemy, damageTypeUsed, notes);
   const enemyLevel = enemy.level;
-  const defOverride = typeof enemy.defMultiplierOverride === "number" && Number.isFinite(enemy.defMultiplierOverride)
-    ? enemy.defMultiplierOverride
-    : null;
-  const defMultUsed = defOverride !== null
-    ? defOverride
-    : (attackerLevel + 100) / ((attackerLevel + 100) + (enemyLevel + 100));
-  const resPctRaw = enemy.resistanceByType?.[damageTypeUsed];
-  const resPctUsed = Number.isFinite(resPctRaw) ? Number(resPctRaw) : DEFAULT_RESISTANCE_PCT;
-  const resMultUsed = resolveResistanceMultiplier(resPctUsed);
+  const defMultUsed = (attackerLevel + 100) / ((attackerLevel + 100) + (enemyLevel + 100));
 
-  const nonCrit = base * (1 + dmgBonusPct / 100) * defMultUsed * resMultUsed;
-  const critDmg = Math.max(0, state.combatTotals.critDmgPct / 100);
-  const critRateRaw = clamp(state.combatTotals.critRatePct / 100, 0, 1);
-  const effectiveCritRate = useCrit ? critRateRaw : 0;
+  const critRateRaw = normalizePctPointsToRatio(state.combatTotals.critRatePct, "crit_rate", notes);
+  const critRateClamped = clamp(critRateRaw.ratio, 0, 1);
+  if (critRateClamped !== critRateRaw.ratio) {
+    notes.push(`clamped_crit_rate_ratio:${critRateRaw.ratio}->${critRateClamped}`);
+  }
 
-  let crit = nonCrit * (1 + critDmg);
-  let avg = nonCrit * (1 + effectiveCritRate * critDmg);
+  const critDmgRaw = normalizePctPointsToRatio(state.combatTotals.critDmgPct, "crit_dmg", notes);
+  const critDmgClamped = Math.max(0, critDmgRaw.ratio);
+  if (critDmgClamped !== critDmgRaw.ratio) {
+    notes.push(`clamped_crit_dmg_ratio:${critDmgRaw.ratio}->${critDmgClamped}`);
+  }
+
+  const preEnemyNonCrit = base * (1 + dmgBonus.ratio) * defMultUsed;
+  const effectiveCritRate = useCrit ? critRateClamped : 0;
+
+  let preEnemyCrit = preEnemyNonCrit * (1 + critDmgClamped);
+  let preEnemyAvg = preEnemyNonCrit * (1 + effectiveCritRate * critDmgClamped);
 
   if (!useCrit) {
-    crit = nonCrit;
-    avg = nonCrit;
+    preEnemyCrit = preEnemyNonCrit;
+    preEnemyAvg = preEnemyNonCrit;
     notes.push("crit_disabled_non_crit_output");
   }
 
+  const enemyAdjusted = applyEnemyRes(
+    {
+      nonCrit: preEnemyNonCrit,
+      crit: preEnemyCrit,
+      avg: preEnemyAvg,
+    },
+    enemy,
+    spec.resShredPctPoints ?? 0,
+  );
+  notes.push(...enemyAdjusted.notes);
+
   return {
-    nonCrit,
-    crit,
-    avg,
+    nonCrit: enemyAdjusted.nonCrit,
+    crit: enemyAdjusted.crit,
+    avg: enemyAdjusted.avg,
     breakdown: {
       base,
       multiplier,
-      dmgBonusPct,
+      dmgBonusPct: dmgBonus.pctPoints,
       critRate: effectiveCritRate,
-      critDmg,
+      critDmg: critDmgClamped,
       hitKey: lookup.hitKey || spec.hitKey || "",
       kind: spec.kind,
       damageType: damageTypeUsed,
@@ -213,8 +236,8 @@ export function computeHitDamage(
       damageTypeUsed,
       enemyLevel,
       defMultUsed,
-      resPctUsed,
-      resMultUsed,
+      resPctUsed: enemyAdjusted.resPctUsed,
+      resMultUsed: enemyAdjusted.resMultUsed,
       notes,
     },
   };

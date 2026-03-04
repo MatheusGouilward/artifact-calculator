@@ -135,6 +135,68 @@ describe("damage multiplier lookup", () => {
 });
 
 describe("computeHitDamage", () => {
+  it("keeps crit and avg scaling consistent with pct-point crit and bonus inputs", () => {
+    const core = makeMockCore();
+    core.talents[999001].skill["Skill Hit%"] = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100];
+
+    const state: CharacterState = {
+      characterId: 999001,
+      talentLevels: {
+        normal: 6,
+        skill: 6,
+        burst: 6,
+      },
+      combatTotals: {
+        hp: 20000,
+        atk: 2000,
+        def: 800,
+        em: 100,
+        critRatePct: 84.85,
+        critDmgPct: 200.6,
+        dmgBonusPhysicalPct: 0,
+        dmgBonusByElementPct: {
+          physical: 0,
+          pyro: 0,
+          hydro: 0,
+          electro: 0,
+          cryo: 0,
+          dendro: 0,
+          anemo: 61.6,
+          geo: 0,
+        },
+      },
+    };
+
+    const result = computeHitDamage(
+      state,
+      {
+        kind: "skill",
+        hitKey: "Skill Hit%",
+        damageType: "anemo",
+        useCrit: true,
+        enemy: {
+          level: 90,
+          baseResPctPoints: 0,
+          damageType: "anemo",
+        },
+      },
+      core,
+    );
+
+    const crRatio = state.combatTotals.critRatePct / 100;
+    const cdRatio = state.combatTotals.critDmgPct / 100;
+    const bonusRatio = state.combatTotals.dmgBonusByElementPct.anemo / 100;
+    const expectedDefMult = (90 + 100) / ((90 + 100) + (90 + 100));
+    const epsilon = 1e-9;
+
+    const expectedNonCrit = state.combatTotals.atk * (1 + bonusRatio) * expectedDefMult;
+    expect(Math.abs(result.nonCrit - expectedNonCrit)).toBeLessThanOrEqual(epsilon);
+    expect(Math.abs(result.crit - result.nonCrit * (1 + cdRatio))).toBeLessThanOrEqual(epsilon);
+    expect(Math.abs(result.avg - result.nonCrit * (1 + crRatio * cdRatio))).toBeLessThanOrEqual(epsilon);
+    expect(result.avg).toBeGreaterThanOrEqual(result.nonCrit);
+    expect(result.avg).toBeLessThanOrEqual(result.crit);
+  });
+
   it("computes non-crit / crit / avg from state + multiplier", () => {
     const core = makeMockCore();
     const state: CharacterState = {
@@ -174,8 +236,8 @@ describe("computeHitDamage", () => {
         useCrit: true,
         enemy: {
           level: 90,
-          resistanceByType: { pyro: 0 },
-          defMultiplierOverride: 1,
+          baseResPctPoints: 0,
+          damageType: "pyro",
         },
       },
       core,
@@ -183,7 +245,8 @@ describe("computeHitDamage", () => {
 
     const expectedMultiplier = 1.7;
     const expectedBase = 2000 * expectedMultiplier;
-    const expectedNonCrit = expectedBase * (1 + 46.6 / 100);
+    const expectedDefMult = (90 + 100) / ((90 + 100) + (90 + 100));
+    const expectedNonCrit = expectedBase * (1 + 46.6 / 100) * expectedDefMult;
     const expectedCrit = expectedNonCrit * (1 + 1);
     const expectedAvg = expectedNonCrit * (1 + 0.5 * 1);
 
@@ -232,8 +295,8 @@ describe("computeHitDamage", () => {
         useCrit: true,
         enemy: {
           level: 90,
-          resistanceByType: { pyro: 0 },
-          defMultiplierOverride: 1,
+          baseResPctPoints: 0,
+          damageType: "pyro",
         },
       },
       core,
@@ -241,7 +304,8 @@ describe("computeHitDamage", () => {
 
     const expectedMultiplier = 1.7;
     const expectedBase = 30000 * expectedMultiplier;
-    const expectedNonCrit = expectedBase * 1.5;
+    const expectedDefMult = (90 + 100) / ((90 + 100) + (90 + 100));
+    const expectedNonCrit = expectedBase * 1.5 * expectedDefMult;
     const expectedCrit = expectedNonCrit * 2;
     const expectedAvg = expectedNonCrit * 1.5;
 
@@ -359,8 +423,8 @@ describe("computeHitDamage", () => {
         damageType: "physical",
         enemy: {
           level: 90,
-          resistanceByType: { physical: 0 },
-          defMultiplierOverride: 1,
+          baseResPctPoints: 0,
+          damageType: "physical",
         },
       },
       core,
@@ -382,8 +446,8 @@ describe("computeHitDamage", () => {
         damageType: "physical",
         enemy: {
           level: 90,
-          resistanceByType: { physical: 80 },
-          defMultiplierOverride: 1,
+          baseResPctPoints: 80,
+          damageType: "physical",
         },
       },
       core,
@@ -396,8 +460,8 @@ describe("computeHitDamage", () => {
         damageType: "physical",
         enemy: {
           level: 90,
-          resistanceByType: { physical: 10 },
-          defMultiplierOverride: 1,
+          baseResPctPoints: 10,
+          damageType: "physical",
         },
       },
       core,
@@ -410,8 +474,8 @@ describe("computeHitDamage", () => {
         damageType: "physical",
         enemy: {
           level: 90,
-          resistanceByType: { physical: -20 },
-          defMultiplierOverride: 1,
+          baseResPctPoints: -20,
+          damageType: "physical",
         },
       },
       core,

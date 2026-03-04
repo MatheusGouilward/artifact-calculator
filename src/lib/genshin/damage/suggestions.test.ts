@@ -40,7 +40,7 @@ function makeSetup(overrides: Partial<DamageSetup["combatTotals"]> = {}): Damage
 
 function mockMetricEvaluator(
   setup: DamageSetup,
-  context: { sectionFilter: AttackKind[]; includeCrit: boolean; enemy?: { resistanceByType?: Partial<Record<DamageType, number>> } },
+  context: { sectionFilter: AttackKind[]; includeCrit: boolean; enemy?: { baseResPctPoints?: number } },
 ) {
   const sectionCount = Math.max(1, context.sectionFilter.length);
   const critRate = context.includeCrit ? Math.max(0, Math.min(1, setup.combatTotals.critRatePct / 100)) : 0;
@@ -48,7 +48,7 @@ function mockMetricEvaluator(
   const dmgBonus = setup.damageTypeOverride === "physical"
     ? setup.combatTotals.dmgBonusPhysicalPct / 100
     : setup.combatTotals.dmgBonusByElementPct[(setup.damageTypeOverride ?? "physical") as DamageType] / 100;
-  const resistancePct = context.enemy?.resistanceByType?.[(setup.damageTypeOverride ?? "physical") as DamageType] ?? 10;
+  const resistancePct = context.enemy?.baseResPctPoints ?? 10;
   const resistanceMult = 1 - resistancePct / 100;
   const base = setup.combatTotals.atk * (1 + dmgBonus);
   const metric = base * (1 + critRate * critDmg) * sectionCount * resistanceMult;
@@ -110,7 +110,8 @@ describe("computeSuggestionRankings", () => {
       topN: 5,
       enemy: {
         level: 90,
-        resistanceByType: { physical: 10 },
+        baseResPctPoints: 10,
+        damageType: "physical",
       },
       evaluateMetric: mockMetricEvaluator,
     });
@@ -118,7 +119,8 @@ describe("computeSuggestionRankings", () => {
       topN: 5,
       enemy: {
         level: 90,
-        resistanceByType: { physical: 80 },
+        baseResPctPoints: 80,
+        damageType: "physical",
       },
       evaluateMetric: mockMetricEvaluator,
     });
